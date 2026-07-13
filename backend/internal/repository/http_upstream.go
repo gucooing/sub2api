@@ -64,7 +64,7 @@ const (
 	// client version. Keep a known-good stable version in the binary while
 	// allowing operators to bump it without waiting for a Sub2API release.
 	grokCLIProxyHost       = "cli-chat-proxy.grok.com"
-	grokCLIStableVersion   = "0.2.93"
+	grokCLIStableVersion   = "0.2.99"
 	grokCLIVersionOverride = "XAI_GROK_CLI_VERSION"
 )
 

@@ -23,7 +23,7 @@ const (
 	grokComposerImageBridgeVisionModel     = "grok-build-0.1"
 	grokComposerImageBridgeMaxOutputTokens = 512
 	grokUpstreamUserAgent                  = "sub2api-grok/1.0"
-	grokCLIVersion                         = "0.2.93"
+	grokCLIVersion                         = "0.2.99"
 	grokRateLimitFallbackCooldown          = 2 * time.Minute
 	// Free-tier 429 bodies often omit Retry-After / x-ratelimit-reset-*.
 	// xAI states free usage resets on a rolling 24-hour window.

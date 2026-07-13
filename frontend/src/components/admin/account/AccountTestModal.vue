@@ -66,12 +66,20 @@
         />
       </div>
 
-      <div v-if="supportsImageTest" class="space-y-1.5">
+      <div class="space-y-1.5">
         <TextArea
           v-model="testPrompt"
-          :label="t('admin.accounts.imagePromptLabel')"
-          :placeholder="t('admin.accounts.imagePromptPlaceholder')"
-          :hint="t('admin.accounts.imageTestHint')"
+          :label="supportsImageTest ? t('admin.accounts.imagePromptLabel') : t('admin.accounts.textPromptLabel')"
+          :placeholder="
+            supportsImageTest
+              ? t('admin.accounts.imagePromptPlaceholder')
+              : t('admin.accounts.textPromptPlaceholder')
+          "
+          :hint="
+            supportsImageTest
+              ? t('admin.accounts.imageTestHint')
+              : t('admin.accounts.textPromptHint')
+          "
           :disabled="status === 'connecting'"
           rows="3"
         />
@@ -189,7 +197,7 @@
           {{
             supportsImageTest
               ? t('admin.accounts.imageTestMode')
-              : t('admin.accounts.testPrompt')
+              : t('admin.accounts.testPrompt', { prompt: effectiveTestPrompt })
           }}
         </span>
       </div>
@@ -309,6 +317,14 @@ const supportsOpenAIImageTest = computed(() => {
 
 const supportsImageTest = computed(() => supportsGeminiImageTest.value || supportsOpenAIImageTest.value)
 
+// Empty text prompt defaults to "hi" on the frontend; image tests keep their own default.
+const effectiveTestPrompt = computed(() => {
+  const trimmed = testPrompt.value.trim()
+  if (trimmed) return trimmed
+  if (supportsImageTest.value) return t('admin.accounts.imagePromptDefault')
+  return 'hi'
+})
+
 const sortTestModels = (models: ClaudeModel[]) => {
   const priorityMap = new Map(prioritizedGeminiModels.map((id, index) => [id, index]))
 
@@ -424,7 +440,8 @@ const startTest = async () => {
       mode?: 'default' | 'compact'
     } = {
       model_id: selectedModelId.value,
-      prompt: supportsImageTest.value ? testPrompt.value.trim() : ''
+      // Always send a non-empty prompt; empty input defaults to "hi" (or image default).
+      prompt: effectiveTestPrompt.value
     }
     if (isOpenAIAccount.value) {
       requestBody.mode = testMode.value
@@ -508,7 +525,7 @@ const handleEvent = (event: {
       addLine(
         supportsImageTest.value
             ? t('admin.accounts.sendingImageRequest')
-            : t('admin.accounts.sendingTestMessage'),
+            : t('admin.accounts.sendingTestMessage', { prompt: effectiveTestPrompt.value }),
         'text-gray-400'
       )
       addLine('', 'text-gray-300')

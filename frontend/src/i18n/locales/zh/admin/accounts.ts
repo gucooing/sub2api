@@ -1234,7 +1234,7 @@ export default {
       testPrompt: '提示词："{prompt}"',
       textPromptLabel: '测试提示词',
       textPromptPlaceholder: '留空则默认发送 hi',
-      textPromptHint: '可选。不填写时后端默认使用 hi。',
+      textPromptHint: '可选。不填写时前端默认传入 hi。',
       imagePromptLabel: '生图提示词',
       imagePromptPlaceholder: '例如：生成一只戴宇航员头盔的橘猫，像素插画风格，纯色背景。',
       imagePromptDefault: 'Generate a cute orange cat astronaut sticker on a clean pastel background.',

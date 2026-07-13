@@ -317,7 +317,7 @@ const supportsOpenAIImageTest = computed(() => {
 
 const supportsImageTest = computed(() => supportsGeminiImageTest.value || supportsOpenAIImageTest.value)
 
-// Empty text prompt falls back to backend default "hi"; image tests keep their own default.
+// Empty text prompt defaults to "hi" on the frontend; image tests keep their own default.
 const effectiveTestPrompt = computed(() => {
   const trimmed = testPrompt.value.trim()
   if (trimmed) return trimmed
@@ -446,8 +446,8 @@ const startTest = async () => {
       },
       body: JSON.stringify({
         model_id: selectedModelId.value,
-        // Empty string lets the backend use its default ("hi" for text, image default for image models).
-        prompt: testPrompt.value.trim(),
+        // Always send a non-empty prompt; empty input defaults to "hi" (or image default).
+        prompt: effectiveTestPrompt.value,
         mode: isOpenAIAccount.value ? testMode.value : 'default'
       }),
       signal: abortController.signal

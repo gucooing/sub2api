@@ -1152,7 +1152,7 @@ export default {
       testPrompt: 'Prompt: "{prompt}"',
       textPromptLabel: 'Test prompt',
       textPromptPlaceholder: 'Leave empty to send the default "hi"',
-      textPromptHint: 'Optional. If empty, the backend defaults to "hi".',
+      textPromptHint: 'Optional. If empty, the frontend defaults to "hi".',
       imagePromptLabel: 'Image prompt',
       imagePromptPlaceholder: 'Example: Generate an orange cat astronaut sticker in pixel-art style on a solid background.',
       imagePromptDefault: 'Generate a cute orange cat astronaut sticker on a clean pastel background.',

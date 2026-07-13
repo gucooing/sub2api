@@ -145,7 +145,7 @@ describe('AccountTestModal', () => {
     expect(JSON.parse(options.body)).toMatchObject({
       model_id: 'gpt-5.4',
       mode: 'compact',
-      prompt: ''
+      prompt: 'hi'
     })
   })
 
