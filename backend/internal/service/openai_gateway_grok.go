@@ -323,15 +323,32 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 
 	rawTools := tools.Array()
 	filteredTools := make([]json.RawMessage, 0, len(rawTools))
+	seenNames := make(map[string]struct{}, len(rawTools))
+	toolsChanged := false
 	for _, tool := range rawTools {
 		toolType := strings.TrimSpace(tool.Get("type").String())
-		if _, ok := grokResponsesSupportedToolTypes[toolType]; ok {
-			filteredTools = append(filteredTools, json.RawMessage(tool.Raw))
+		if _, ok := grokResponsesSupportedToolTypes[toolType]; !ok {
+			toolsChanged = true
+			continue
 		}
+		effectiveName := grokResponsesToolEffectiveName(tool)
+		rawTool := json.RawMessage(tool.Raw)
+		if toolType == "function" && isGrokNativeSearchToolName(effectiveName) {
+			rawTool = json.RawMessage(`{"type":"` + effectiveName + `"}`)
+			toolsChanged = true
+		}
+		if effectiveName != "" {
+			if _, duplicate := seenNames[effectiveName]; duplicate {
+				toolsChanged = true
+				continue
+			}
+			seenNames[effectiveName] = struct{}{}
+		}
+		filteredTools = append(filteredTools, rawTool)
 	}
 
 	var err error
-	if len(filteredTools) != len(rawTools) {
+	if toolsChanged || len(filteredTools) != len(rawTools) {
 		if len(filteredTools) == 0 {
 			body, err = sjson.DeleteBytes(body, "tools")
 		} else {
@@ -358,6 +375,27 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 		}
 	}
 	return body, nil
+}
+
+func isGrokNativeSearchToolName(name string) bool {
+	return name == "web_search" || name == "x_search"
+}
+
+func grokResponsesToolEffectiveName(tool gjson.Result) string {
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	if name != "" {
+		return name
+	}
+	switch toolType {
+	case "web_search", "x_search":
+		return toolType
+	default:
+		return ""
+	}
 }
 
 func shouldDropGrokToolChoice(toolChoice gjson.Result, tools []json.RawMessage) bool {
@@ -717,6 +755,7 @@ func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Acc
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	applyGrokCLIHeaders(req.Header)
+	applyGrokChatProxyHeaders(req, account)
 	applyGrokCacheHeaders(req.Header, cacheIdentity)
 	if c != nil {
 		if v := c.GetHeader("OpenAI-Beta"); strings.TrimSpace(v) != "" {
@@ -724,6 +763,19 @@ func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Acc
 		}
 	}
 	return req, nil
+}
+
+func applyGrokChatProxyHeaders(req *http.Request, account *Account) {
+	if req == nil || account == nil || !account.IsGrokOAuth() {
+		return
+	}
+	baseURL := strings.TrimRight(strings.TrimSpace(account.GetGrokBaseURL()), "/")
+	if !strings.EqualFold(baseURL, xai.DefaultCLIBaseURL) {
+		return
+	}
+	req.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+	req.Header.Set("x-grok-client-version", grokCLIVersion)
+	req.Header.Set("x-authenticateresponse", "authenticate-response")
 }
 
 // applyGrokCLIHeaders identifies subscription traffic as a supported Grok CLI

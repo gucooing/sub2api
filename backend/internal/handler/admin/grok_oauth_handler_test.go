@@ -41,15 +41,21 @@ func (r *grokQuotaHandlerAccountRepo) UpdateExtra(_ context.Context, id int64, u
 }
 
 type grokQuotaHandlerUpstream struct {
-	resp     *http.Response
-	lastReq  *http.Request
-	lastBody []byte
+	resp      *http.Response
+	responses []*http.Response
+	lastReq   *http.Request
+	lastBody  []byte
 }
 
 func (u *grokQuotaHandlerUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
 	u.lastReq = req
 	if req.Body != nil {
 		u.lastBody, _ = io.ReadAll(req.Body)
+	}
+	if len(u.responses) > 0 {
+		resp := u.responses[0]
+		u.responses = u.responses[1:]
+		return resp, nil
 	}
 	return u.resp, nil
 }
@@ -75,15 +81,22 @@ func TestGrokOAuthHandlerQueryQuotaProbesUpstream(t *testing.T) {
 		Credentials: map[string]any{
 			"access_token": "access-token",
 			"expires_at":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"user_id":      "user-42",
 		},
 	}}
-	upstream := &grokQuotaHandlerUpstream{resp: &http.Response{
-		StatusCode: http.StatusOK,
-		Header: http.Header{
-			"X-Ratelimit-Limit-Requests":     []string{"10"},
-			"X-Ratelimit-Remaining-Requests": []string{"8"},
+	upstream := &grokQuotaHandlerUpstream{responses: []*http.Response{
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body: io.NopCloser(strings.NewReader(
+				`{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"}}}`,
+			)),
 		},
-		Body: io.NopCloser(strings.NewReader(`{"id":"resp_probe"}`)),
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader(`{"config":{}}`)),
+		},
 	}}
 	quotaService := service.NewGrokQuotaService(repo, nil, service.NewGrokTokenProvider(repo, nil), upstream)
 	handler := NewGrokOAuthHandler(nil, nil, quotaService)
@@ -95,12 +108,15 @@ func TestGrokOAuthHandlerQueryQuotaProbesUpstream(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), `"source":"active_probe"`)
-	require.Contains(t, rec.Body.String(), `"headers_observed":true`)
+	require.Contains(t, rec.Body.String(), `"source":"billing_api"`)
+	require.Contains(t, rec.Body.String(), `"headers_observed":false`)
 	require.NotContains(t, rec.Body.String(), "access-token")
-	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+	require.Equal(t, xai.DefaultCLIBaseURL+"/billing", upstream.lastReq.URL.String())
+	require.Equal(t, http.MethodGet, upstream.lastReq.Method)
 	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
-	require.Contains(t, string(upstream.lastBody), `"store":false`)
+	require.Equal(t, "xai-grok-cli", upstream.lastReq.Header.Get("X-XAI-Token-Auth"))
+	require.Equal(t, "user-42", upstream.lastReq.Header.Get("x-userid"))
+	require.Empty(t, upstream.lastBody)
 	require.NotNil(t, repo.updates[42])
 }
 

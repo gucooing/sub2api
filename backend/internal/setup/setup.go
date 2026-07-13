@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"github.com/redis/go-redis/v9"
+	"gopkg.in/yaml.v3"
 	"os"
 	"strconv"
 	"strings"
@@ -18,8 +20,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
 	_ "github.com/lib/pq"
-	"github.com/redis/go-redis/v9"
-	"gopkg.in/yaml.v3"
 )
 
 // Config paths
@@ -41,6 +41,7 @@ func setupDefaultAdminConcurrency() int {
 // GetDataDir returns the data directory for storing config and lock files.
 // Priority: DATA_DIR env > /app/data (if exists and writable) > current directory
 func GetDataDir() string {
+	return "."
 	// Check DATA_DIR environment variable first
 	if dir := os.Getenv("DATA_DIR"); dir != "" {
 		return dir

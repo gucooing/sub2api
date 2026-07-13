@@ -111,17 +111,52 @@ func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity str
 	if !injectFreeTierTools {
 		return out, nil
 	}
-	// Inspect the pre-sanitization source. patchGrokResponsesBody may remove an
-	// unsupported client tool and its tool_choice; that must not turn an
-	// explicit client tool intent into an eligible native-tool request.
-	if gjson.GetBytes(intentSourceBody, "tools").Exists() || gjson.GetBytes(intentSourceBody, "tool_choice").Exists() {
+	intentTools := gjson.GetBytes(intentSourceBody, "tools")
+	intentToolChoice := gjson.GetBytes(intentSourceBody, "tool_choice")
+	if intentToolChoice.Exists() && !intentTools.Exists() {
 		return out, nil
+	}
+	if intentTools.Exists() {
+		return appendGrokFreeCacheNativeTools(out)
 	}
 	out, err = sjson.SetRawBytes(out, "tools", []byte(grokFreeCacheNativeToolsJSON))
 	if err != nil {
 		return nil, err
 	}
 	return sjson.SetBytes(out, "tool_choice", grokFreeCacheDisabledToolChoice)
+}
+
+// appendGrokFreeCacheNativeTools preserves client tools and their tool_choice
+// while adding the native markers used by xAI's cache-capable free route.
+func appendGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body, nil
+	}
+	hasWebSearch := false
+	hasXSearch := false
+	for _, tool := range tools.Array() {
+		switch grokResponsesToolEffectiveName(tool) {
+		case "web_search":
+			hasWebSearch = true
+		case "x_search":
+			hasXSearch = true
+		}
+	}
+	var err error
+	if !hasWebSearch {
+		body, err = sjson.SetRawBytes(body, "tools.-1", []byte(`{"type":"web_search"}`))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !hasXSearch {
+		body, err = sjson.SetRawBytes(body, "tools.-1", []byte(`{"type":"x_search"}`))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return body, nil
 }
 
 // applyGrokCacheHeaders applies the documented Chat Completions conversation

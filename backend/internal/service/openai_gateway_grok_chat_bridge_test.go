@@ -163,6 +163,44 @@ func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.
 	require.NotNil(t, repo.updates[account.ID][grokQuotaSnapshotExtraKey])
 }
 
+func TestForwardGrokChatViaResponsesKeepsCacheIdentityAcrossConversationTurns(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	account := grokChatBridgeTestAccount(75)
+	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		grokChatBridgeCompletedResponse("resp_grok_chat_turn_1", 0),
+		grokChatBridgeCompletedResponse("resp_grok_chat_turn_2", 4096),
+	}}
+	svc := &OpenAIGatewayService{
+		httpUpstream:      upstream,
+		grokTokenProvider: NewGrokTokenProvider(repo, nil),
+		accountRepo:       repo,
+	}
+
+	firstBody := []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"first question"}],"stream":false}`)
+	secondBody := []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"first question"},{"role":"assistant","content":"first answer"},{"role":"user","content":"second question"}],"stream":false}`)
+	for _, body := range [][]byte{firstBody, secondBody} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
+		c.Set("api_key", &APIKey{ID: 7501, Group: &Group{Platform: PlatformGrok}})
+		_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+		require.NoError(t, err)
+	}
+
+	require.Len(t, upstream.bodies, 2)
+	require.Len(t, upstream.requests, 2)
+	firstIdentity := gjson.GetBytes(upstream.bodies[0], "prompt_cache_key").String()
+	secondIdentity := gjson.GetBytes(upstream.bodies[1], "prompt_cache_key").String()
+	require.NotEmpty(t, firstIdentity)
+	require.Equal(t, firstIdentity, secondIdentity)
+	require.Equal(t, firstIdentity, upstream.requests[0].Header.Get(grokConversationIDHeader))
+	require.Equal(t, secondIdentity, upstream.requests[1].Header.Get(grokConversationIDHeader))
+}
+
 func TestForwardGrokChatViaResponsesStreamingPropagatesCachedUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

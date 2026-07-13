@@ -140,7 +140,7 @@ func TestApplyGrokCacheIdentityWritesResponsesBodyAndHeader(t *testing.T) {
 	require.False(t, gjson.GetBytes(unscopedBody, "tool_choice").Exists())
 }
 
-func TestApplyGrokCacheIdentityPreservesExplicitClientToolFields(t *testing.T) {
+func TestApplyGrokCacheIdentityAppendsNativeToolsToClientTools(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
@@ -182,8 +182,24 @@ func TestApplyGrokCacheIdentityPreservesExplicitClientToolFields(t *testing.T) {
 			body, err := applyGrokResponsesCacheIdentity([]byte(tt.body), []byte(tt.body), "isolated-id", true)
 			require.NoError(t, err)
 			require.Equal(t, "isolated-id", gjson.GetBytes(body, "prompt_cache_key").String())
-			require.Equal(t, beforeTools.Exists(), gjson.GetBytes(body, "tools").Exists())
-			require.Equal(t, beforeTools.Raw, gjson.GetBytes(body, "tools").Raw)
+			gotTools := gjson.GetBytes(body, "tools")
+			if beforeTools.IsArray() {
+				hasWebSearch := false
+				hasXSearch := false
+				for _, tool := range gotTools.Array() {
+					switch grokResponsesToolEffectiveName(tool) {
+					case "web_search":
+						hasWebSearch = true
+					case "x_search":
+						hasXSearch = true
+					}
+				}
+				require.True(t, hasWebSearch)
+				require.True(t, hasXSearch)
+			} else {
+				require.Equal(t, beforeTools.Exists(), gotTools.Exists())
+				require.Equal(t, beforeTools.Raw, gotTools.Raw)
+			}
 			require.Equal(t, beforeChoice.Exists(), gjson.GetBytes(body, "tool_choice").Exists())
 			require.Equal(t, beforeChoice.Raw, gjson.GetBytes(body, "tool_choice").Raw)
 		})
