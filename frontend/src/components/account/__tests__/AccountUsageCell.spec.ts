@@ -566,6 +566,49 @@ describe('AccountUsageCell', () => {
 		expect(badges.some(node => node.attributes('title') === 'usage.userBilled')).toBe(true)
   })
 
+  it('Grok free 额度耗尽时展示带结束时间的提醒', async () => {
+    const resetAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString()
+    getUsage.mockResolvedValue({
+      error_code: 'rate_limited',
+      grok_entitlement_status: 'free_usage_exhausted',
+      grok_last_status_code: 429,
+      grok_token_quota: {
+        limit: 2000000,
+        remaining: 0,
+        reset_at: resetAt
+      },
+      grok_quota_snapshot_state: 'observed'
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 4291,
+          platform: 'grok',
+          type: 'oauth',
+          rate_limit_reset_at: resetAt,
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color', 'remainingCapacity'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true,
+          GrokQuotaProbeCell: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.grokFreeUsageExhaustedUntil')
+    expect(wrapper.text()).toContain(`admin.accounts.usageWindow.grokTokens|0|${resetAt}`)
+    expect(wrapper.text()).not.toContain('free_usage_exhausted')
+  })
+
   it('Grok OAuth 会展示本地 user billed 用量并把耗尽配额显示为 0% 剩余', async () => {
     getUsage.mockResolvedValue({
       grok_local_usage: {

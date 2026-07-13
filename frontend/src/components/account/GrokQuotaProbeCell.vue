@@ -50,6 +50,7 @@ import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { GrokQuotaProbeResult, GrokQuotaWindow } from '@/api/admin/grok'
 import type { Account } from '@/types'
+import { formatCountdown } from '@/utils/format'
 
 const props = defineProps<{
   account: Account
@@ -96,13 +97,34 @@ const summary = computed(() => {
   const parts = [
     formatWindow(t('admin.accounts.usageWindow.grokRequests'), snapshot.requests),
     formatWindow(t('admin.accounts.usageWindow.grokTokens'), snapshot.tokens)
-  ].filter(Boolean)
-  if (retryAfterLabel.value) {
-    parts.push(t('admin.accounts.usageWindow.grokRetryAfter', { time: retryAfterLabel.value }))
-  }
-  if (snapshot.entitlement_status) {
+  ].filter(Boolean) as string[]
+
+  const freeExhausted =
+    (snapshot.entitlement_status || '').toLowerCase() === 'free_usage_exhausted' ||
+    (snapshot.observation_source || '').toLowerCase() === 'free_usage_exhausted_body'
+  const resetAt =
+    snapshot.tokens?.reset_at ||
+    snapshot.requests?.reset_at ||
+    null
+  if (freeExhausted) {
+    if (resetAt) {
+      const countdown = formatCountdown(resetAt)
+      parts.push(
+        countdown
+          ? t('admin.accounts.usageWindow.grokFreeUsageExhaustedUntil', { time: countdown })
+          : t('admin.accounts.usageWindow.grokFreeUsageExhausted')
+      )
+    } else {
+      parts.push(t('admin.accounts.usageWindow.grokFreeUsageExhausted'))
+    }
+  } else if (snapshot.entitlement_status) {
     parts.push(snapshot.entitlement_status)
   }
+
+  if (!freeExhausted && !resetAt && retryAfterLabel.value) {
+    parts.push(t('admin.accounts.usageWindow.grokRetryAfter', { time: retryAfterLabel.value }))
+  }
+
   return parts.length > 0 ? parts.join(' | ') : t('admin.accounts.usageWindow.grokNoHeaders')
 })
 

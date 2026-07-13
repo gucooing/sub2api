@@ -1047,7 +1047,7 @@ func TestAccountTestServiceGrokAPIKeyUsesXAIResponses(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/54/test", nil)
 
-	err := svc.testGrokAccountConnection(c, account, "grok")
+	err := svc.testGrokAccountConnection(c, account, "grok", "")
 	require.NoError(t, err)
 	require.Equal(t, "https://api.x.ai/v1/responses", upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer xai-test-key", upstream.lastReq.Header.Get("Authorization"))
@@ -1671,6 +1671,78 @@ func TestHandleGrokAccountUpstreamError429UsesFallbackReset(t *testing.T) {
 	require.Equal(t, 1, repo.rateLimitedCalls)
 	require.WithinDuration(t, before.Add(grokRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
 	require.Zero(t, repo.tempUnschedCalls)
+}
+
+func TestParseGrokFreeUsageExhausted(t *testing.T) {
+	body := []byte(`{
+  "code" : "subscription:free-usage-exhausted",
+  "error" : "You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 2138145/2000000. Upgrade to a Grok subscription for higher limits: https://grok.com/supergrok"
+}`)
+	info := parseGrokFreeUsageExhausted(body)
+	require.NotNil(t, info)
+	require.Equal(t, "grok-4.5-build-free", info.Model)
+	require.NotNil(t, info.TokensUsed)
+	require.Equal(t, int64(2138145), *info.TokensUsed)
+	require.NotNil(t, info.TokensLimit)
+	require.Equal(t, int64(2000000), *info.TokensLimit)
+
+	require.Nil(t, parseGrokFreeUsageExhausted([]byte(`{"error":{"message":"rate limited"}}`)))
+	require.Nil(t, parseGrokFreeUsageExhausted(nil))
+}
+
+func TestHandleGrokAccountUpstreamError429FreeUsageExhaustedUses24hWindow(t *testing.T) {
+	account := &Account{ID: 66, Platform: PlatformGrok, Type: AccountTypeOAuth}
+	repo := &grokQuotaAccountRepo{}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	before := time.Now()
+	body := []byte(`{
+  "code":"subscription:free-usage-exhausted",
+  "error":"You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window — tokens (actual/limit): 2138145/2000000."
+}`)
+
+	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, nil, body)
+
+	require.Equal(t, 1, repo.rateLimitedCalls)
+	require.WithinDuration(t, before.Add(grokFreeUsageExhaustedCooldown), repo.lastRateLimitResetAt, 2*time.Second)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.Zero(t, repo.tempUnschedCalls)
+
+	require.Equal(t, 1, repo.updateCalls)
+	raw, ok := repo.updates[account.ID][grokQuotaSnapshotExtraKey]
+	require.True(t, ok)
+	snapshot, ok := raw.(*xai.QuotaSnapshot)
+	require.True(t, ok)
+	require.NotNil(t, snapshot)
+	require.Equal(t, grokFreeUsageExhaustedSource, snapshot.ObservationSource)
+	require.Equal(t, grokFreeUsageExhaustedStatus, snapshot.EntitlementStatus)
+	require.NotNil(t, snapshot.Tokens)
+	require.NotNil(t, snapshot.Tokens.Remaining)
+	require.Equal(t, int64(0), *snapshot.Tokens.Remaining)
+	require.NotNil(t, snapshot.Tokens.Limit)
+	require.Equal(t, int64(2000000), *snapshot.Tokens.Limit)
+	require.NotEmpty(t, snapshot.Tokens.ResetAt)
+	resetAt, err := time.Parse(time.RFC3339, snapshot.Tokens.ResetAt)
+	require.NoError(t, err)
+	require.WithinDuration(t, before.Add(grokFreeUsageExhaustedCooldown), resetAt, 2*time.Second)
+}
+
+func TestHandleGrokAccountUpstreamError429FreeUsageExhaustedDoesNotOverrideHeaderReset(t *testing.T) {
+	now := time.Now()
+	headerReset := now.Add(90 * time.Minute).Truncate(time.Second)
+	headers := http.Header{
+		"X-Ratelimit-Limit-Tokens":     []string{"2000000"},
+		"X-Ratelimit-Remaining-Tokens": []string{"0"},
+		"X-Ratelimit-Reset-Tokens":     []string{fmt.Sprintf("%d", headerReset.Unix())},
+	}
+	account := &Account{ID: 67, Platform: PlatformGrok, Type: AccountTypeOAuth}
+	repo := &grokQuotaAccountRepo{}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	body := []byte(`{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for model grok-4.5-build-free for now."}`)
+
+	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, headers, body)
+
+	require.Equal(t, 1, repo.rateLimitedCalls)
+	require.WithinDuration(t, headerReset, repo.lastRateLimitResetAt, time.Second)
 }
 
 func TestGrokRateLimitResetAtUsesFutureWindowAfterRetryAfterExpires(t *testing.T) {

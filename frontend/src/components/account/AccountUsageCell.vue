@@ -362,6 +362,13 @@
             {{ grokEntitlementLabel }}
           </span>
         </div>
+        <div
+          v-if="grokRateLimitReminder"
+          class="mb-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+          :title="grokRateLimitReminderTitle || undefined"
+        >
+          {{ grokRateLimitReminder }}
+        </div>
         <div v-if="grokLocalUsage" class="mb-0.5 flex items-center">
           <div class="flex items-center gap-1.5 text-[9px] text-gray-500 dark:text-gray-400">
             <span class="rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-800">
@@ -404,7 +411,7 @@
         <div v-if="grokQuotaUnknown" class="text-[10px] text-gray-500 dark:text-gray-400">
           {{ grokQuotaUnknownLabel }}
         </div>
-        <div v-else-if="usageInfo.error" class="truncate text-xs text-amber-600 dark:text-amber-400 max-w-[200px]" :title="usageInfo.error">
+        <div v-else-if="usageInfo.error && !grokRateLimitReminder" class="truncate text-xs text-amber-600 dark:text-amber-400 max-w-[200px]" :title="usageInfo.error">
           {{ usageErrorLabel }}
         </div>
         <div v-if="grokQuotaStatusLine" class="text-[10px] text-gray-500 dark:text-gray-400">
@@ -606,7 +613,7 @@ import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
-import { formatCompactNumber, formatRelativeTime } from '@/utils/format'
+import { formatCompactNumber, formatCountdown, formatDateTime, formatRelativeTime } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
@@ -1038,7 +1045,13 @@ interface GrokQuotaBarInfo {
 }
 
 const makeGrokQuotaBar = (quota?: { limit?: number | null; remaining?: number | null; reset_at?: string | null } | null): GrokQuotaBarInfo | null => {
-  if (!quota || quota.limit == null || quota.remaining == null || quota.limit <= 0) return null
+  if (!quota) return null
+  // Free-usage exhaustion may only give remaining=0 + reset_at without a hard limit.
+  // Still render the bar so the recovery end time is visible.
+  if ((quota.limit == null || quota.limit <= 0) && quota.reset_at && (quota.remaining == null || quota.remaining <= 0)) {
+    return { utilization: 0, resetsAt: quota.reset_at }
+  }
+  if (quota.limit == null || quota.remaining == null || quota.limit <= 0) return null
   const remaining = Math.min(quota.limit, Math.max(0, quota.remaining))
   return {
     utilization: (remaining / quota.limit) * 100,
@@ -1051,6 +1064,7 @@ const grokTokenQuotaBar = computed(() => makeGrokQuotaBar(usageInfo.value?.grok_
 const grokQuotaUnknown = computed(() => {
   if (props.account.platform !== 'grok') return false
   if (grokRequestQuotaBar.value || grokTokenQuotaBar.value) return false
+  if (grokRateLimitReminder.value) return false
   return usageInfo.value?.grok_quota_snapshot_state !== 'observed'
 })
 const grokQuotaUnknownLabel = computed(() => {
@@ -1082,16 +1096,84 @@ const grokQuotaStatusLine = computed(() => {
   return parts.length > 0 ? parts.join(' | ') : null
 })
 const grokLocalUsage = computed(() => usageInfo.value?.grok_local_usage || props.todayStats || null)
+
+const isGrokFreeUsageExhausted = computed(() => {
+  const status = (usageInfo.value?.grok_entitlement_status || '').trim().toLowerCase()
+  return status === 'free_usage_exhausted' || status.includes('free_usage_exhausted')
+})
+
+const isGrokAccountRateLimited = computed(() => {
+  if (!props.account.rate_limit_reset_at) return false
+  const resetTime = Date.parse(props.account.rate_limit_reset_at)
+  if (Number.isNaN(resetTime)) return false
+  return resetTime > Date.now()
+})
+
+const grokRecoveryAt = computed((): string | null => {
+  const candidates = [
+    usageInfo.value?.grok_token_quota?.reset_at,
+    usageInfo.value?.grok_request_quota?.reset_at,
+    props.account.rate_limit_reset_at
+  ]
+  let best: string | null = null
+  let bestMs = 0
+  for (const value of candidates) {
+    if (!value) continue
+    const ms = Date.parse(value)
+    if (Number.isNaN(ms) || ms <= Date.now()) continue
+    if (ms > bestMs) {
+      bestMs = ms
+      best = value
+    }
+  }
+  return best
+})
+
+const grokRateLimitReminder = computed(() => {
+  if (props.account.platform !== 'grok') return null
+  const freeExhausted = isGrokFreeUsageExhausted.value
+  const rateLimited =
+    freeExhausted ||
+    usageInfo.value?.error_code === 'rate_limited' ||
+    usageInfo.value?.grok_last_status_code === 429 ||
+    isGrokAccountRateLimited.value
+  if (!rateLimited) return null
+
+  const countdown = formatCountdown(grokRecoveryAt.value)
+  if (freeExhausted) {
+    return countdown
+      ? t('admin.accounts.usageWindow.grokFreeUsageExhaustedUntil', { time: countdown })
+      : t('admin.accounts.usageWindow.grokFreeUsageExhausted')
+  }
+  return countdown
+    ? t('admin.accounts.usageWindow.grokRateLimitedUntil', { time: countdown })
+    : t('admin.accounts.rateLimited')
+})
+
+const grokRateLimitReminderTitle = computed(() => {
+  if (!grokRecoveryAt.value) return null
+  return formatDateTime(grokRecoveryAt.value)
+})
+
 const grokEntitlementLabel = computed(() => {
   const status = (usageInfo.value?.grok_entitlement_status || '').trim()
-  return status || null
+  if (!status) return null
+  // free_usage_exhausted is shown via the dedicated reminder with recovery time.
+  if (status.toLowerCase() === 'free_usage_exhausted') return null
+  return status
 })
 const grokRetryAfterLabel = computed(() => {
+  // Prefer explicit recovery-time reminder / progress-bar reset over raw Retry-After seconds.
+  if (grokRateLimitReminder.value || grokRequestQuotaBar.value?.resetsAt || grokTokenQuotaBar.value?.resetsAt) {
+    return null
+  }
   const seconds = usageInfo.value?.grok_retry_after_seconds
   if (seconds == null || seconds <= 0) return null
   if (seconds < 60) return `${seconds}s`
-  const minutes = Math.ceil(seconds / 60)
-  return `${minutes}m`
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`
+  const hours = Math.floor(seconds / 3600)
+  const mins = Math.ceil((seconds % 3600) / 60)
+  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
 })
 
 const formatWindowRequests = (stats: WindowStats) => formatCompactNumber(stats.requests, { allowBillions: false })

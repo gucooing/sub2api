@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,12 @@ const (
 	grokUpstreamUserAgent                  = "sub2api-grok/1.0"
 	grokCLIVersion                         = "0.2.93"
 	grokRateLimitFallbackCooldown          = 2 * time.Minute
+	// Free-tier 429 bodies often omit Retry-After / x-ratelimit-reset-*.
+	// xAI states free usage resets on a rolling 24-hour window.
+	grokFreeUsageExhaustedCooldown = 24 * time.Hour
+	grokFreeUsageExhaustedCode     = "subscription:free-usage-exhausted"
+	grokFreeUsageExhaustedSource   = "free_usage_exhausted_body"
+	grokFreeUsageExhaustedStatus   = "free_usage_exhausted"
 )
 
 func (s *OpenAIGatewayService) forwardGrokResponses(
@@ -838,6 +845,152 @@ func parseGrokQuotaSnapshot(headers http.Header, statusCode int, now time.Time) 
 	return snapshot
 }
 
+// grokFreeUsageExhaustedInfo captures the free-tier quota-exhaustion 429 that
+// xAI returns without Retry-After or ratelimit reset headers.
+type grokFreeUsageExhaustedInfo struct {
+	Model       string
+	TokensUsed  *int64
+	TokensLimit *int64
+}
+
+func isGrokFreeUsageExhaustedSnapshot(snapshot *xai.QuotaSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(snapshot.ObservationSource), grokFreeUsageExhaustedSource) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(snapshot.EntitlementStatus), grokFreeUsageExhaustedStatus)
+}
+
+func parseGrokFreeUsageExhausted(body []byte) *grokFreeUsageExhaustedInfo {
+	if len(body) == 0 {
+		return nil
+	}
+	code := strings.TrimSpace(gjson.GetBytes(body, "code").String())
+	errorText := strings.TrimSpace(gjson.GetBytes(body, "error").String())
+	if errorText == "" {
+		errorText = strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
+	}
+	if errorText == "" {
+		errorText = strings.TrimSpace(gjson.GetBytes(body, "message").String())
+	}
+	normalizedCode := strings.ToLower(code)
+	normalizedText := strings.ToLower(errorText)
+	rawLower := strings.ToLower(string(body))
+	matched := normalizedCode == grokFreeUsageExhaustedCode ||
+		strings.Contains(normalizedCode, "free-usage-exhausted") ||
+		strings.Contains(normalizedText, "free-usage-exhausted") ||
+		strings.Contains(normalizedText, "included free usage") ||
+		strings.Contains(rawLower, "subscription:free-usage-exhausted")
+	if !matched {
+		return nil
+	}
+
+	info := &grokFreeUsageExhaustedInfo{}
+	// "for model grok-4.5-build-free for now"
+	if idx := strings.Index(normalizedText, "for model "); idx >= 0 {
+		rest := strings.TrimSpace(errorText[idx+len("for model "):])
+		fields := strings.Fields(rest)
+		if len(fields) > 0 {
+			info.Model = strings.Trim(fields[0], ".,;:\"'")
+		}
+	}
+	// "tokens (actual/limit): 2138145/2000000" (may be followed by punctuation)
+	if idx := strings.Index(normalizedText, "tokens (actual/limit):"); idx >= 0 {
+		rest := strings.TrimSpace(errorText[idx+len("tokens (actual/limit):"):])
+		fields := strings.Fields(rest)
+		if len(fields) > 0 {
+			ratio := strings.Trim(fields[0], ".,;:\"'")
+			parts := strings.Split(ratio, "/")
+			if len(parts) == 2 {
+				if used, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64); err == nil {
+					info.TokensUsed = &used
+				}
+				if limit, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil {
+					info.TokensLimit = &limit
+				}
+			}
+		}
+	}
+	return info
+}
+
+// applyGrokFreeUsageExhaustedToSnapshot synthesizes a durable token window reset
+// when free-tier 429 responses omit Retry-After / x-ratelimit-reset headers.
+// Without this, the account would only cool down for grokRateLimitFallbackCooldown
+// and keep being reselected for ~24h of guaranteed failures.
+func applyGrokFreeUsageExhaustedToSnapshot(snapshot *xai.QuotaSnapshot, info *grokFreeUsageExhaustedInfo, now time.Time) *xai.QuotaSnapshot {
+	if info == nil {
+		return snapshot
+	}
+	if snapshot == nil {
+		snapshot = &xai.QuotaSnapshot{
+			StatusCode: http.StatusTooManyRequests,
+			UpdatedAt:  now.UTC().Format(time.RFC3339),
+		}
+	}
+	if snapshot.StatusCode == 0 {
+		snapshot.StatusCode = http.StatusTooManyRequests
+	}
+	if strings.TrimSpace(snapshot.UpdatedAt) == "" {
+		snapshot.UpdatedAt = now.UTC().Format(time.RFC3339)
+	}
+	snapshot.ObservationSource = grokFreeUsageExhaustedSource
+	if strings.TrimSpace(snapshot.EntitlementStatus) == "" {
+		snapshot.EntitlementStatus = grokFreeUsageExhaustedStatus
+	}
+	if snapshot.Headers == nil {
+		snapshot.Headers = make(map[string]string)
+	}
+	snapshot.Headers["x-sub2api-grok-error-code"] = grokFreeUsageExhaustedCode
+	if info.Model != "" {
+		snapshot.Headers["x-sub2api-grok-free-model"] = info.Model
+	}
+
+	resetAt := now.Add(grokFreeUsageExhaustedCooldown)
+	resetUnix := resetAt.Unix()
+	remaining := int64(0)
+	window := snapshot.Tokens
+	if window == nil {
+		window = &xai.QuotaWindow{}
+		snapshot.Tokens = window
+	}
+	if window.Remaining == nil || *window.Remaining > 0 {
+		window.Remaining = &remaining
+	}
+	if window.Limit == nil {
+		switch {
+		case info.TokensLimit != nil && *info.TokensLimit > 0:
+			window.Limit = info.TokensLimit
+		case info.TokensUsed != nil && *info.TokensUsed > 0:
+			// Upstream sometimes only reports used tokens; keep a positive limit so
+			// quota UI can render remaining=0% with the synthetic reset time.
+			window.Limit = info.TokensUsed
+		default:
+			one := int64(1)
+			window.Limit = &one
+		}
+	}
+	// Prefer an already-known future reset from headers; otherwise use the
+	// rolling 24h free-usage window described by xAI.
+	hasFutureReset := false
+	if window.ResetUnix != nil && *window.ResetUnix > now.Unix() {
+		hasFutureReset = true
+	} else if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(window.ResetAt)); err == nil && parsed.After(now) {
+		hasFutureReset = true
+	}
+	if !hasFutureReset {
+		window.ResetUnix = &resetUnix
+		window.ResetAt = resetAt.UTC().Format(time.RFC3339)
+	}
+	snapshot.HeadersObserved = true
+	if strings.TrimSpace(snapshot.LastHeadersSeenAt) == "" {
+		snapshot.LastHeadersSeenAt = now.UTC().Format(time.RFC3339)
+	}
+	return snapshot
+}
+
 func normalizeGrokExhaustedWindowResets(snapshot *xai.QuotaSnapshot, resetAt, now time.Time) {
 	if snapshot == nil || !resetAt.After(now) {
 		return
@@ -909,6 +1062,9 @@ func grokRateLimitResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time
 		return time.Time{}, false
 	}
 	if exhausted || snapshot.StatusCode == http.StatusTooManyRequests {
+		if isGrokFreeUsageExhaustedSnapshot(snapshot) {
+			return now.Add(grokFreeUsageExhaustedCooldown), true
+		}
 		return now.Add(grokRateLimitFallbackCooldown), true
 	}
 	return time.Time{}, false
@@ -971,14 +1127,17 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok access or entitlement denied")
 	case http.StatusTooManyRequests:
 		now := time.Now()
-		s.updateGrokUsageSnapshot(ctx, account, parseGrokQuotaSnapshot(headers, statusCode, now))
+		snapshot := parseGrokQuotaSnapshot(headers, statusCode, now)
+		if info := parseGrokFreeUsageExhausted(responseBody); info != nil {
+			snapshot = applyGrokFreeUsageExhaustedToSnapshot(snapshot, info, now)
+		}
+		s.updateGrokUsageSnapshot(ctx, account, snapshot)
 		// updateGrokUsageSnapshot installs both runtime and durable rate-limit state.
 	default:
 		if statusCode >= 500 {
 			s.tempUnscheduleGrok(ctx, account, 2*time.Minute, "grok upstream temporary error")
 		}
 	}
-	_ = responseBody
 }
 
 func (s *OpenAIGatewayService) tempUnscheduleGrok(ctx context.Context, account *Account, cooldown time.Duration, reason string) {
