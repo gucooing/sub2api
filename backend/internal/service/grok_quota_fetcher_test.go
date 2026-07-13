@@ -107,9 +107,18 @@ func TestGrokQuotaFetcherClassifiesForbiddenAndReauth(t *testing.T) {
 		wantForbid  bool
 		wantCode    string
 		wantEntitle string
+		entitlement string
 	}{
 		{name: "reauth", statusCode: http.StatusUnauthorized, wantReauth: true, wantCode: "unauthenticated"},
-		{name: "forbidden", statusCode: http.StatusForbidden, wantForbid: true, wantCode: "forbidden", wantEntitle: "forbidden"},
+		{name: "temporary forbidden", statusCode: http.StatusForbidden, wantCode: "upstream_error"},
+		{
+			name:        "explicit entitlement denial",
+			statusCode:  http.StatusForbidden,
+			entitlement: "ENTITLEMENT_DENIED",
+			wantForbid:  true,
+			wantCode:    "forbidden",
+			wantEntitle: "ENTITLEMENT_DENIED",
+		},
 	}
 
 	for _, tt := range tests {
@@ -120,9 +129,10 @@ func TestGrokQuotaFetcherClassifiesForbiddenAndReauth(t *testing.T) {
 				Type:     AccountTypeOAuth,
 				Extra: map[string]any{
 					grokQuotaSnapshotExtraKey: xai.QuotaSnapshot{
-						StatusCode:      tt.statusCode,
-						HeadersObserved: true,
-						UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+						StatusCode:        tt.statusCode,
+						EntitlementStatus: tt.entitlement,
+						HeadersObserved:   true,
+						UpdatedAt:         time.Now().UTC().Format(time.RFC3339),
 					},
 				},
 			}
@@ -131,6 +141,39 @@ func TestGrokQuotaFetcherClassifiesForbiddenAndReauth(t *testing.T) {
 			require.Equal(t, tt.wantForbid, usage.IsForbidden)
 			require.Equal(t, tt.wantCode, usage.ErrorCode)
 			require.Equal(t, tt.wantEntitle, usage.GrokEntitlementStatus)
+		})
+	}
+}
+
+func TestEnrichUsageWithAccountErrorRequiresPersistentGrokDenial(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		message     string
+		wantForbid  bool
+		wantErrCode string
+	}{
+		{name: "temporary HTTP 403", message: "HTTP 403 Forbidden", wantForbid: false},
+		{name: "entitlement denied", message: "Grok entitlement denied", wantForbid: true, wantErrCode: "forbidden"},
+		{name: "entitlement forbidden", message: "Grok entitlement forbidden", wantForbid: true, wantErrCode: "forbidden"},
+		{name: "validation required", message: "403 validation required", wantForbid: true, wantErrCode: "forbidden"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			usage := &UsageInfo{}
+			account := &Account{
+				Platform:     PlatformGrok,
+				Status:       StatusError,
+				ErrorMessage: tt.message,
+			}
+
+			enrichUsageWithAccountError(usage, account)
+
+			require.Equal(t, tt.wantForbid, usage.IsForbidden)
+			require.Equal(t, tt.wantErrCode, usage.ErrorCode)
 		})
 	}
 }

@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
@@ -60,16 +61,27 @@ func (f *GrokQuotaFetcher) BuildUsageInfo(account *Account) *UsageInfo {
 		usage.NeedsReauth = true
 		usage.ErrorCode = "unauthenticated"
 	case 403:
-		usage.IsForbidden = true
-		usage.ForbiddenType = "forbidden"
-		usage.ErrorCode = "forbidden"
-		if usage.GrokEntitlementStatus == "" {
-			usage.GrokEntitlementStatus = "forbidden"
+		usage.ErrorCode = "upstream_error"
+		usage.Error = "The latest Grok request returned HTTP 403"
+		if grokEntitlementIsForbidden(snapshot.EntitlementStatus) {
+			usage.IsForbidden = true
+			usage.ForbiddenType = "forbidden"
+			usage.ErrorCode = "forbidden"
 		}
 	case 429:
 		usage.ErrorCode = "rate_limited"
 	}
 	return usage
+}
+
+func grokEntitlementIsForbidden(status string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	for _, marker := range []string{"forbidden", "denied", "ineligible", "revoked", "suspended", "blocked", "disabled"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func grokQuotaSnapshotFromExtra(extra map[string]any) (*xai.QuotaSnapshot, error) {

@@ -1492,6 +1492,7 @@ func TestHandleGrokAccountUpstreamErrorTempUnschedulesNonRateLimitStates(t *test
 		{
 			name:            "forbidden entitlement",
 			status:          http.StatusForbidden,
+			headers:         http.Header{"X-Entitlement-Status": []string{"ENTITLEMENT_DENIED"}},
 			wantReason:      "grok access or entitlement denied",
 			wantMinCooldown: 30*time.Minute - time.Second,
 			wantMaxCooldown: 30*time.Minute + time.Second,
@@ -1515,6 +1516,7 @@ func TestHandleGrokAccountUpstreamErrorTempUnschedulesNonRateLimitStates(t *test
 			svc.handleGrokAccountUpstreamError(context.Background(), account, tt.status, tt.headers, nil)
 
 			require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+			require.Zero(t, repo.updateCalls)
 			require.Equal(t, 1, repo.tempUnschedCalls)
 			require.Zero(t, repo.rateLimitedCalls)
 			require.Equal(t, account.ID, repo.lastTempUnschedID)
@@ -1534,6 +1536,7 @@ func TestHandleGrokAccountUpstreamError429SetsRateLimitedFromRetryAfter(t *testi
 	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, http.Header{"Retry-After": []string{"45"}}, nil)
 
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.Equal(t, 1, repo.updateCalls)
 	require.Equal(t, 1, repo.rateLimitedCalls)
 	require.Equal(t, account.ID, repo.lastRateLimitedID)
 	require.WithinDuration(t, before.Add(45*time.Second), repo.lastRateLimitResetAt, time.Second)

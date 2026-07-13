@@ -734,7 +734,8 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 
 	now := time.Now()
 	snapshot := parseGrokQuotaSnapshot(resp.Header, resp.StatusCode, now)
-	if snapshot != nil && s.accountRepo != nil {
+	shouldPersistQuota := resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusTooManyRequests
+	if shouldPersistQuota && snapshot != nil && s.accountRepo != nil {
 		resetAt, limited := grokRateLimitResetAt(snapshot, now)
 		if limited {
 			normalizeGrokExhaustedWindowResets(snapshot, resetAt, now)

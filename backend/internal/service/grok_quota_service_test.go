@@ -209,6 +209,7 @@ func TestGrokQuotaServiceProbeUsagePreservesConversationQuota(t *testing.T) {
 	require.EqualValues(t, requestLimit, *result.Snapshot.Requests.Limit)
 	require.EqualValues(t, requestRemaining, *result.Snapshot.Requests.Remaining)
 	require.Equal(t, observedAt, result.Snapshot.LastHeadersSeenAt)
+	require.Equal(t, http.StatusOK, result.Snapshot.StatusCode)
 }
 
 func TestGrokQuotaServiceProbeUsageLoadsProxy(t *testing.T) {

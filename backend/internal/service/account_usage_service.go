@@ -1027,9 +1027,18 @@ func enrichUsageWithAccountError(info *UsageInfo, account *Account) {
 		return
 	}
 	msg := strings.ToLower(account.ErrorMessage)
-	if !strings.Contains(msg, "403") && !strings.Contains(msg, "forbidden") &&
-		!strings.Contains(msg, "violation") && !strings.Contains(msg, "validation") {
-		return
+	if account.Platform == PlatformGrok {
+		if !grokAccountErrorIndicatesPersistentForbidden(msg) {
+			return
+		}
+	} else {
+		hasForbiddenMarker := strings.Contains(msg, "403") ||
+			strings.Contains(msg, "forbidden") ||
+			strings.Contains(msg, "violation") ||
+			strings.Contains(msg, "validation")
+		if !hasForbiddenMarker {
+			return
+		}
 	}
 	fbType := classifyForbiddenType(account.ErrorMessage)
 	info.IsForbidden = true
@@ -1040,6 +1049,20 @@ func enrichUsageWithAccountError(info *UsageInfo, account *Account) {
 	info.ValidationURL = extractValidationURL(account.ErrorMessage)
 	info.ErrorCode = errorCodeForbidden
 	info.NeedsReauth = false
+}
+
+func grokAccountErrorIndicatesPersistentForbidden(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(message, "validation") || strings.Contains(message, "violation") {
+		return true
+	}
+	hasEntitlementSignal := strings.Contains(message, "entitlement")
+	hasPersistentDenial := strings.Contains(message, "denied") ||
+		strings.Contains(message, "forbidden") ||
+		strings.Contains(message, "revoked") ||
+		strings.Contains(message, "suspended") ||
+		strings.Contains(message, "ineligible")
+	return hasEntitlementSignal && hasPersistentDenial
 }
 
 // addWindowStats 为 usage 数据添加窗口期统计

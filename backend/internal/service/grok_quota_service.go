@@ -281,6 +281,7 @@ func grokSnapshotAfterBillingProbe(account *Account, status int) *xai.QuotaSnaps
 		observed, err := grokQuotaSnapshotFromExtra(account.Extra)
 		if err == nil && observed != nil && observed.HasObservedHeaders() {
 			cloned := *observed
+			cloned.StatusCode = status
 			cloned.LastProbeAt = now
 			if strings.TrimSpace(cloned.ObservationSource) == "" {
 				cloned.ObservationSource = "chat_response_headers"

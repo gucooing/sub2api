@@ -660,6 +660,39 @@ describe('AccountUsageCell', () => {
     expect(wrapper.text()).toContain('admin.accounts.usageWindow.grokTokens|25|true')
   })
 
+  it('Grok OAuth forbidden 状态仍显示主动探测入口', async () => {
+    getUsage.mockResolvedValue({
+      is_forbidden: true,
+      forbidden_type: 'forbidden',
+      error_code: 'forbidden',
+      grok_entitlement_status: 'ENTITLEMENT_DENIED'
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 4074,
+          platform: 'grok',
+          type: 'oauth',
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: true,
+          AccountQuotaInfo: true,
+          GrokQuotaProbeCell: {
+            template: '<button data-testid="grok-quota-probe">probe</button>'
+          }
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="grok-quota-probe"]').exists()).toBe(true)
+  })
+
   it('Key 账号在 today stats loading 时显示骨架屏', async () => {
 		const wrapper = mount(AccountUsageCell, {
 		  props: {
