@@ -269,6 +269,58 @@ func TestPatchGrokResponsesBodyDropsCodexAdditionalToolsInputItems(t *testing.T)
 	require.Equal(t, "hello", gjson.GetBytes(patched, "input.1.content.0.text").String())
 }
 
+func TestPatchGrokResponsesBodyRewritesCodexCustomToolHistory(t *testing.T) {
+	t.Parallel()
+
+	// Codex multi-turn history commonly includes custom_tool_call /
+	// custom_tool_call_output / item_reference. xAI rejects those as ModelInput.
+	body := []byte(`{
+		"model": "grok",
+		"tools": [
+			{"type":"custom","name":"shell","description":"Run shell","format":{"type":"text"}},
+			{"type":"function","name":"wait","parameters":{"type":"object","properties":{}}}
+		],
+		"input": [
+			{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"apply_patch"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"list files"}]},
+			{"type":"custom_tool_call","call_id":"call_1","name":"shell","input":"dir"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":"main.go"},
+			{"type":"item_reference","id":"msg_prev"},
+			{"type":"function_call","call_id":"call_2","name":"wait","arguments":"{}"}
+		]
+	}`)
+
+	patched, err := patchGrokResponsesBody(body, "grok-4.5")
+	require.NoError(t, err)
+	require.True(t, json.Valid(patched))
+
+	// custom tool definition rewritten to function
+	require.Equal(t, 2, len(gjson.GetBytes(patched, "tools").Array()))
+	require.Equal(t, "function", gjson.GetBytes(patched, "tools.0.type").String())
+	require.Equal(t, "shell", gjson.GetBytes(patched, "tools.0.name").String())
+	require.Equal(t, "object", gjson.GetBytes(patched, "tools.0.parameters.type").String())
+	require.Equal(t, "function", gjson.GetBytes(patched, "tools.1.type").String())
+	require.Equal(t, "wait", gjson.GetBytes(patched, "tools.1.name").String())
+
+	input := gjson.GetBytes(patched, "input").Array()
+	require.Len(t, input, 4)
+	require.False(t, gjson.GetBytes(patched, `input.#(type=="additional_tools")`).Exists())
+	require.False(t, gjson.GetBytes(patched, `input.#(type=="item_reference")`).Exists())
+	require.False(t, gjson.GetBytes(patched, `input.#(type=="custom_tool_call")`).Exists())
+	require.False(t, gjson.GetBytes(patched, `input.#(type=="custom_tool_call_output")`).Exists())
+
+	require.Equal(t, "message", input[0].Get("type").String())
+	require.Equal(t, "function_call", input[1].Get("type").String())
+	require.Equal(t, "shell", input[1].Get("name").String())
+	require.Equal(t, "call_1", input[1].Get("call_id").String())
+	require.JSONEq(t, `{"input":"dir"}`, input[1].Get("arguments").String())
+	require.Equal(t, "function_call_output", input[2].Get("type").String())
+	require.Equal(t, "call_1", input[2].Get("call_id").String())
+	require.Equal(t, "main.go", input[2].Get("output").String())
+	require.Equal(t, "function_call", input[3].Get("type").String())
+	require.Equal(t, "wait", input[3].Get("name").String())
+}
+
 func TestBuildGrokResponsesRequestUsesAccountBaseURLAndBearerToken(t *testing.T) {
 	t.Setenv(xai.EnvAllowUnsafeURLOverrides, "true")
 

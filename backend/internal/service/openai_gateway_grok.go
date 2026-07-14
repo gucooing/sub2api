@@ -278,15 +278,16 @@ func deleteJSONFields(value any, fields map[string]struct{}) bool {
 	}
 }
 
-// additional_tools is a Codex/Responses Lite private input carrier. xAI's
-// Responses schema accepts ordinary message/function-call input items but
-// rejects this carrier before inference with a ModelInput deserialization
-// error. Top-level supported tools remain available through the separate
-// sanitizeGrokResponsesTools path.
+// Codex/Responses Lite emits input item types that xAI's Responses schema does
+// not accept. Untagged ModelInput deserialization then fails with:
+//
+//	Failed to deserialize the JSON body into the target type:
+//	data did not match any variant of untagged enum ModelInput
+//
+// We drop private carriers and rewrite custom/shell tool history into the
+// ordinary function_call / function_call_output shape Grok understands.
+// Top-level tools are handled separately by sanitizeGrokResponsesTools.
 func sanitizeGrokResponsesInput(body []byte) ([]byte, error) {
-	if !bytes.Contains(body, []byte(`"additional_tools"`)) {
-		return body, nil
-	}
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
 		return body, nil
@@ -294,13 +295,47 @@ func sanitizeGrokResponsesInput(body []byte) ([]byte, error) {
 
 	rawItems := input.Array()
 	filtered := make([]json.RawMessage, 0, len(rawItems))
+	changed := false
 	for _, item := range rawItems {
-		if strings.TrimSpace(item.Get("type").String()) == "additional_tools" {
+		// Plain string input items are valid ModelInput entries.
+		if item.Type == gjson.String {
+			filtered = append(filtered, json.RawMessage(item.Raw))
 			continue
 		}
-		filtered = append(filtered, json.RawMessage(item.Raw))
+		if !item.IsObject() {
+			changed = true
+			continue
+		}
+
+		itemType := strings.TrimSpace(item.Get("type").String())
+		switch itemType {
+		case "additional_tools", "item_reference",
+			"computer_call", "computer_call_output",
+			"image_generation_call", "code_interpreter_call",
+			"mcp_list_tools", "mcp_approval_request", "mcp_approval_response", "mcp_call":
+			changed = true
+			continue
+		case "custom_tool_call", "local_shell_call", "tool_call":
+			rewritten, ok := rewriteGrokUnsupportedToolCallInput(item, itemType)
+			if !ok {
+				changed = true
+				continue
+			}
+			filtered = append(filtered, rewritten)
+			changed = true
+		case "custom_tool_call_output", "local_shell_call_output", "tool_call_output":
+			rewritten, ok := rewriteGrokUnsupportedToolCallOutput(item)
+			if !ok {
+				changed = true
+				continue
+			}
+			filtered = append(filtered, rewritten)
+			changed = true
+		default:
+			filtered = append(filtered, json.RawMessage(item.Raw))
+		}
 	}
-	if len(filtered) == len(rawItems) {
+	if !changed {
 		return body, nil
 	}
 	encoded, err := json.Marshal(filtered)
@@ -308,6 +343,122 @@ func sanitizeGrokResponsesInput(body []byte) ([]byte, error) {
 		return nil, err
 	}
 	return sjson.SetRawBytes(body, "input", encoded)
+}
+
+func rewriteGrokUnsupportedToolCallInput(item gjson.Result, itemType string) (json.RawMessage, bool) {
+	name := strings.TrimSpace(item.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(item.Get("action").String())
+	}
+	if name == "" && itemType == "local_shell_call" {
+		name = "local_shell"
+	}
+	if name == "" {
+		return nil, false
+	}
+
+	callID := firstNonEmpty(
+		strings.TrimSpace(item.Get("call_id").String()),
+		strings.TrimSpace(item.Get("id").String()),
+	)
+	arguments := strings.TrimSpace(item.Get("arguments").String())
+	if arguments == "" {
+		if raw := item.Get("input"); raw.Exists() {
+			arguments = grokToolCallArgumentsFromFreeform(raw)
+		} else if raw := item.Get("action"); raw.IsObject() {
+			if encoded, err := json.Marshal(raw.Value()); err == nil {
+				arguments = string(encoded)
+			}
+		}
+	}
+	if arguments == "" {
+		arguments = "{}"
+	}
+
+	out := map[string]any{
+		"type":      "function_call",
+		"name":      name,
+		"arguments": arguments,
+	}
+	if callID != "" {
+		out["call_id"] = callID
+	}
+	if status := strings.TrimSpace(item.Get("status").String()); status != "" {
+		out["status"] = status
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(encoded), true
+}
+
+func rewriteGrokUnsupportedToolCallOutput(item gjson.Result) (json.RawMessage, bool) {
+	callID := firstNonEmpty(
+		strings.TrimSpace(item.Get("call_id").String()),
+		strings.TrimSpace(item.Get("id").String()),
+	)
+	if callID == "" {
+		return nil, false
+	}
+	output := item.Get("output")
+	var outputValue any
+	switch {
+	case !output.Exists():
+		outputValue = ""
+	case output.Type == gjson.String:
+		outputValue = output.String()
+	default:
+		outputValue = output.Value()
+	}
+	out := map[string]any{
+		"type":    "function_call_output",
+		"call_id": callID,
+		"output":  outputValue,
+	}
+	if status := strings.TrimSpace(item.Get("status").String()); status != "" {
+		out["status"] = status
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(encoded), true
+}
+
+func grokToolCallArgumentsFromFreeform(raw gjson.Result) string {
+	switch raw.Type {
+	case gjson.String:
+		text := raw.String()
+		trimmed := strings.TrimSpace(text)
+		if trimmed == "" {
+			return "{}"
+		}
+		// Already a JSON object/array/string literal — keep as function arguments.
+		if (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+			(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")) ||
+			(strings.HasPrefix(trimmed, `"`) && strings.HasSuffix(trimmed, `"`)) {
+			if json.Valid([]byte(trimmed)) {
+				return trimmed
+			}
+		}
+		encoded, err := json.Marshal(map[string]string{"input": text})
+		if err != nil {
+			return "{}"
+		}
+		return string(encoded)
+	case gjson.JSON:
+		if raw.IsObject() || raw.IsArray() {
+			return raw.Raw
+		}
+		fallthrough
+	default:
+		encoded, err := json.Marshal(map[string]any{"input": raw.Value()})
+		if err != nil {
+			return "{}"
+		}
+		return string(encoded)
+	}
 }
 
 var grokResponsesSupportedToolTypes = map[string]struct{}{
@@ -334,12 +485,27 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 	toolsChanged := false
 	for _, tool := range rawTools {
 		toolType := strings.TrimSpace(tool.Get("type").String())
+		rawTool := json.RawMessage(tool.Raw)
+
+		// Codex freeform/custom tools are not in xAI's tool enum; rewrite as
+		// plain function tools so shell/apply_patch/etc stay callable.
+		if toolType == "custom" || toolType == "freeform" {
+			rewritten, ok := rewriteGrokCustomToolDefinition(tool)
+			if !ok {
+				toolsChanged = true
+				continue
+			}
+			rawTool = rewritten
+			tool = gjson.ParseBytes(rewritten)
+			toolType = "function"
+			toolsChanged = true
+		}
+
 		if _, ok := grokResponsesSupportedToolTypes[toolType]; !ok {
 			toolsChanged = true
 			continue
 		}
 		effectiveName := grokResponsesToolEffectiveName(tool)
-		rawTool := json.RawMessage(tool.Raw)
 		if toolType == "function" && isGrokNativeSearchToolName(effectiveName) {
 			rawTool = json.RawMessage(`{"type":"` + effectiveName + `"}`)
 			toolsChanged = true
@@ -382,6 +548,59 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 		}
 	}
 	return body, nil
+}
+
+func rewriteGrokCustomToolDefinition(tool gjson.Result) (json.RawMessage, bool) {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	if name == "" {
+		return nil, false
+	}
+	description := strings.TrimSpace(tool.Get("description").String())
+	if description == "" {
+		description = strings.TrimSpace(tool.Get("function.description").String())
+	}
+
+	// Prefer an explicit JSON schema when Codex already provided one.
+	parameters := tool.Get("parameters")
+	if !parameters.Exists() {
+		parameters = tool.Get("function.parameters")
+	}
+	var params any
+	if parameters.Exists() && parameters.IsObject() {
+		params = parameters.Value()
+	} else {
+		// Freeform custom tools often only carry format=text. Wrap the freeform
+		// payload as a single string argument so Grok can still invoke the tool.
+		params = map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"input": map[string]any{
+					"type":        "string",
+					"description": "Freeform tool input",
+				},
+			},
+			"required":             []string{"input"},
+			"additionalProperties": true,
+		}
+	}
+
+	out := map[string]any{
+		"type":        "function",
+		"name":        name,
+		"parameters":   params,
+		"strict":      false,
+	}
+	if description != "" {
+		out["description"] = description
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(encoded), true
 }
 
 func isGrokNativeSearchToolName(name string) bool {
