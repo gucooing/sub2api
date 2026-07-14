@@ -27,10 +27,6 @@ func isOpenAIOAuthAccount(account *Account) bool {
 	return account != nil && account.Platform == PlatformOpenAI && account.Type == AccountTypeOAuth
 }
 
-func isGrokOAuthAccount(account *Account) bool {
-	return account != nil && account.Platform == PlatformGrok && account.Type == AccountTypeOAuth
-}
-
 func isOpenAIAccount(account *Account) bool {
 	return account != nil && (account.Platform == PlatformOpenAI || account.Platform == PlatformGrok)
 }
@@ -181,12 +177,13 @@ func (s *OpenAIGatewayService) isOpenAIOAuth429Storm() bool {
 	return s.openaiOAuth429WindowCount.Load() >= openAIOAuth429StormThreshold
 }
 
+// ShouldStopOpenAIOAuth429Failover stops multi-account failover early only for
+// ChatGPT OAuth 429 storms (many concurrent 429s across the pool). Grok OAuth
+// must keep switching on period-quota 429s — free-usage exhaustion is per-account
+// and already cools the failed account for ~24h via handleGrokAccountUpstreamError.
 func (s *OpenAIGatewayService) ShouldStopOpenAIOAuth429Failover(account *Account, statusCode int, failedSwitches int) bool {
 	if statusCode != http.StatusTooManyRequests || failedSwitches < openAIOAuth429StormMaxAccountSwitches {
 		return false
-	}
-	if isGrokOAuthAccount(account) {
-		return true
 	}
 	if !isOpenAIOAuthAccount(account) {
 		return false
