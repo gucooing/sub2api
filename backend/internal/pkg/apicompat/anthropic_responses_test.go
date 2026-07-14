@@ -760,31 +760,30 @@ func TestStreamingReasoning(t *testing.T) {
 		Response: &ResponsesResponse{ID: "resp_3", Model: "gpt-5.2"},
 	}, state)
 
-	// reasoning item added — defer content_block_start until first non-empty delta
-	// so empty reasoning items do not confuse Claude Code's stream state machine.
+	// reasoning item added
 	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type:        "response.output_item.added",
 		OutputIndex: 0,
 		Item:        &ResponsesOutput{Type: "reasoning"},
 	}, state)
-	require.Len(t, events, 0)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_start", events[0].Type)
+	assert.Equal(t, "thinking", events[0].ContentBlock.Type)
 
-	// reasoning text delta opens the thinking block lazily
+	sse, err := ResponsesAnthropicEventToSSE(events[0])
+	require.NoError(t, err)
+	assert.Contains(t, sse, `"content_block":{"thinking":"","type":"thinking"}`)
+
+	// reasoning text delta
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type:        "response.reasoning_summary_text.delta",
 		OutputIndex: 0,
 		Delta:       "Let me think...",
 	}, state)
-	require.Len(t, events, 2)
-	assert.Equal(t, "content_block_start", events[0].Type)
-	assert.Equal(t, "thinking", events[0].ContentBlock.Type)
-	assert.Equal(t, "content_block_delta", events[1].Type)
-	assert.Equal(t, "thinking_delta", events[1].Delta.Type)
-	assert.Equal(t, "Let me think...", events[1].Delta.Thinking)
-
-	sse, err := ResponsesAnthropicEventToSSE(events[0])
-	require.NoError(t, err)
-	assert.Contains(t, sse, `"content_block":{"thinking":"","type":"thinking"}`)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_delta", events[0].Type)
+	assert.Equal(t, "thinking_delta", events[0].Delta.Type)
+	assert.Equal(t, "Let me think...", events[0].Delta.Thinking)
 
 	// reasoning done
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
@@ -792,96 +791,6 @@ func TestStreamingReasoning(t *testing.T) {
 	}, state)
 	require.Len(t, events, 1)
 	assert.Equal(t, "content_block_stop", events[0].Type)
-}
-
-func TestStreamingEmptyReasoningDoesNotEmitBlock(t *testing.T) {
-	state := NewResponsesEventToAnthropicState()
-
-	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:     "response.created",
-		Response: &ResponsesResponse{ID: "resp_empty_think", Model: "gpt-5.2"},
-	}, state)
-
-	// Empty reasoning item: added then done with no deltas.
-	require.Empty(t, ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:        "response.output_item.added",
-		OutputIndex: 0,
-		Item:        &ResponsesOutput{Type: "reasoning"},
-	}, state))
-	require.Empty(t, ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:        "response.output_item.done",
-		OutputIndex: 0,
-		Item:        &ResponsesOutput{Type: "reasoning"},
-	}, state))
-
-	// Subsequent text must start at index 0 (no phantom thinking block).
-	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:        "response.output_text.delta",
-		OutputIndex: 1,
-		Delta:       "hello",
-	}, state)
-	require.Len(t, events, 2)
-	assert.Equal(t, "content_block_start", events[0].Type)
-	require.NotNil(t, events[0].Index)
-	assert.Equal(t, 0, *events[0].Index)
-	assert.Equal(t, "text", events[0].ContentBlock.Type)
-	assert.Equal(t, "content_block_delta", events[1].Type)
-	require.NotNil(t, events[1].Index)
-	assert.Equal(t, 0, *events[1].Index)
-}
-
-func TestStreamingDoesNotCloseToolOnUnrelatedOutputItemDone(t *testing.T) {
-	state := NewResponsesEventToAnthropicState()
-
-	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:     "response.created",
-		Response: &ResponsesResponse{ID: "resp_tool_race", Model: "gpt-5.2"},
-	}, state)
-
-	// Open tool_use at output_index 0.
-	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:        "response.output_item.added",
-		OutputIndex: 0,
-		Item:        &ResponsesOutput{Type: "function_call", CallID: "call_1", Name: "Bash"},
-	}, state)
-	require.Len(t, events, 1)
-	assert.Equal(t, "content_block_start", events[0].Type)
-
-	// Unrelated message output_item.done must not close the open tool block.
-	require.Empty(t, ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:        "response.output_item.done",
-		OutputIndex: 1,
-		Item:        &ResponsesOutput{Type: "message"},
-	}, state))
-
-	// Tool args delta still targets index 0.
-	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:        "response.function_call_arguments.delta",
-		OutputIndex: 0,
-		Delta:       `{"cmd":"ls"}`,
-	}, state)
-	require.Len(t, events, 1)
-	assert.Equal(t, "content_block_delta", events[0].Type)
-	require.NotNil(t, events[0].Index)
-	assert.Equal(t, 0, *events[0].Index)
-
-	// Proper close via arguments.done.
-	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:        "response.function_call_arguments.done",
-		OutputIndex: 0,
-		Arguments:   `{"cmd":"ls"}`,
-	}, state)
-	require.Len(t, events, 1)
-	assert.Equal(t, "content_block_stop", events[0].Type)
-	require.NotNil(t, events[0].Index)
-	assert.Equal(t, 0, *events[0].Index)
-
-	// Late delta after close must be dropped (no Content block not found).
-	require.Empty(t, ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
-		Type:        "response.function_call_arguments.delta",
-		OutputIndex: 0,
-		Delta:       `ignored`,
-	}, state))
 }
 
 func TestStreamingIncomplete(t *testing.T) {

@@ -167,11 +167,6 @@ func sanitizeAnthropicToolUseInput(name string, raw string) json.RawMessage {
 
 // ResponsesEventToAnthropicState tracks state for converting a sequence of
 // Responses SSE events directly into Anthropic SSE events.
-//
-// Claude Code clients raise "Content block not found" when they receive a
-// content_block_delta/stop for an index that was never started, or for a block
-// that was already closed. Keep index ownership strictly one-open-block-at-a-time
-// and only emit deltas against the currently open Anthropic block.
 type ResponsesEventToAnthropicState struct {
 	MessageStartSent bool
 	MessageStopSent  bool
@@ -179,20 +174,12 @@ type ResponsesEventToAnthropicState struct {
 	ContentBlockIndex   int
 	ContentBlockOpen    bool
 	CurrentBlockType    string // "text" | "thinking" | "tool_use"
-	CurrentOutputIndex  int    // Responses output_index bound to the open block; -1 if none
 	CurrentToolName     string
 	CurrentToolArgs     string
 	CurrentToolHadDelta bool
-	// CurrentThinkingHadDelta tracks whether any thinking_delta was emitted for
-	// the open thinking block. Empty thinking blocks (start then immediate stop)
-	// confuse Claude Code's stream state machine.
-	CurrentThinkingHadDelta bool
-	HasToolCall             bool
+	HasToolCall         bool
 
-	// OutputIndexToBlockIdx maps Responses output_index → Anthropic content block index
-	// for currently open / still-targetable tool/thinking blocks. Entries are
-	// removed when the corresponding Anthropic block is closed so late deltas
-	// cannot target a dead index.
+	// OutputIndexToBlockIdx maps Responses output_index → Anthropic content block index.
 	OutputIndexToBlockIdx map[int]int
 
 	InputTokens              int
@@ -209,7 +196,6 @@ type ResponsesEventToAnthropicState struct {
 func NewResponsesEventToAnthropicState() *ResponsesEventToAnthropicState {
 	return &ResponsesEventToAnthropicState{
 		OutputIndexToBlockIdx: make(map[int]int),
-		CurrentOutputIndex:    -1,
 		Created:               time.Now().Unix(),
 	}
 }
@@ -233,8 +219,7 @@ func ResponsesEventToAnthropicEvents(
 		// custom/freeform 工具的输入增量与 function_call 参数增量同形。
 		"response.custom_tool_call_input.delta":
 		return resToAnthHandleFuncArgsDelta(evt, state)
-	case "response.function_call_arguments.done",
-		"response.custom_tool_call_input.done":
+	case "response.function_call_arguments.done":
 		return resToAnthHandleFuncArgsDone(evt, state)
 	case "response.output_item.done":
 		return resToAnthHandleOutputItemDone(evt, state)
@@ -242,8 +227,7 @@ func ResponsesEventToAnthropicEvents(
 		// 原始推理文本增量，与 reasoning summary 一样映射为 thinking。
 		"response.reasoning_text.delta":
 		return resToAnthHandleReasoningDelta(evt, state)
-	case "response.reasoning_summary_text.done",
-		"response.reasoning_text.done":
+	case "response.reasoning_summary_text.done":
 		return resToAnthHandleBlockDone(state)
 	// response.done 是 Realtime/WS 与项目透传路径使用的终止别名；
 	// 普通 Responses HTTP SSE 的公开终止事件仍以 response.completed 为主。
@@ -345,11 +329,9 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
 		state.ContentBlockOpen = true
 		state.CurrentBlockType = "tool_use"
-		state.CurrentOutputIndex = evt.OutputIndex
 		state.CurrentToolName = evt.Item.Name
 		state.CurrentToolArgs = ""
 		state.CurrentToolHadDelta = false
-		state.CurrentThinkingHadDelta = false
 		state.HasToolCall = true
 
 		events = append(events, AnthropicStreamEvent{
@@ -365,20 +347,22 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 		return events
 
 	case "reasoning":
-		// Defer thinking content_block_start until the first non-empty
-		// reasoning delta. Grok/xAI often emits empty reasoning items; an
-		// empty thinking start/stop pair makes Claude Code throw
-		// "Content block not found" on the next block.
 		var events []AnthropicStreamEvent
 		events = append(events, closeCurrentBlock(state)...)
-		state.OutputIndexToBlockIdx[evt.OutputIndex] = state.ContentBlockIndex
+
+		idx := state.ContentBlockIndex
+		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
+		state.ContentBlockOpen = true
 		state.CurrentBlockType = "thinking"
-		state.CurrentOutputIndex = evt.OutputIndex
-		state.ContentBlockOpen = false
-		state.CurrentThinkingHadDelta = false
-		state.CurrentToolName = ""
-		state.CurrentToolArgs = ""
-		state.CurrentToolHadDelta = false
+
+		events = append(events, AnthropicStreamEvent{
+			Type:  "content_block_start",
+			Index: &idx,
+			ContentBlock: &AnthropicContentBlock{
+				Type:     "thinking",
+				Thinking: "",
+			},
+		})
 		return events
 
 	case "message":
@@ -401,9 +385,6 @@ func resToAnthHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 		idx := state.ContentBlockIndex
 		state.ContentBlockOpen = true
 		state.CurrentBlockType = "text"
-		state.CurrentOutputIndex = evt.OutputIndex
-		state.CurrentThinkingHadDelta = false
-		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
 
 		events = append(events, AnthropicStreamEvent{
 			Type:  "content_block_start",
@@ -432,24 +413,18 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		return nil
 	}
 
-	// Only write tool argument deltas to the currently open tool_use block.
-	// Stale OutputIndex mappings after close would otherwise target a dead index
-	// and Claude Code raises "Content block not found".
-	if !state.ContentBlockOpen || state.CurrentBlockType != "tool_use" {
-		return nil
-	}
-	if state.CurrentOutputIndex >= 0 && evt.OutputIndex != state.CurrentOutputIndex {
-		// Fallback: accept delta if mapping still points at the open block.
-		if mapped, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]; !ok || mapped != state.ContentBlockIndex {
-			return nil
-		}
+	if state.CurrentBlockType == "tool_use" {
+		state.CurrentToolHadDelta = true
 	}
 
-	state.CurrentToolHadDelta = true
-	idx := state.ContentBlockIndex
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	if !ok {
+		return nil
+	}
+
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
-		Index: &idx,
+		Index: &blockIdx,
 		Delta: &AnthropicDelta{
 			Type:        "input_json_delta",
 			PartialJSON: evt.Delta,
@@ -458,11 +433,8 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 }
 
 func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
-	// Only act on the currently open tool_use block. Never close text/thinking
-	// on function_call_arguments.done — that produced stop/delta races and the
-	// Claude Code "Content block not found" error.
-	if !state.ContentBlockOpen || state.CurrentBlockType != "tool_use" {
-		return nil
+	if state.CurrentBlockType != "tool_use" {
+		return resToAnthHandleBlockDone(state)
 	}
 
 	raw := evt.Arguments
@@ -498,81 +470,24 @@ func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEv
 		return nil
 	}
 
-	var events []AnthropicStreamEvent
-
-	// Lazily open the thinking block on first non-empty delta. If a deferred
-	// reasoning item was recorded without an open block, promote it now.
-	if !state.ContentBlockOpen || state.CurrentBlockType != "thinking" {
-		// If another block is open, close it first.
-		events = append(events, closeCurrentBlock(state)...)
-
-		idx := state.ContentBlockIndex
-		state.ContentBlockOpen = true
-		state.CurrentBlockType = "thinking"
-		state.CurrentOutputIndex = evt.OutputIndex
-		state.CurrentThinkingHadDelta = false
-		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
-
-		events = append(events, AnthropicStreamEvent{
-			Type:  "content_block_start",
-			Index: &idx,
-			ContentBlock: &AnthropicContentBlock{
-				Type:     "thinking",
-				Thinking: "",
-			},
-		})
-	} else if state.CurrentOutputIndex >= 0 && evt.OutputIndex != state.CurrentOutputIndex {
-		if mapped, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]; !ok || mapped != state.ContentBlockIndex {
-			// Open a new thinking block for this output_index rather than
-			// writing to a foreign/closed index.
-			events = append(events, closeCurrentBlock(state)...)
-			idx := state.ContentBlockIndex
-			state.ContentBlockOpen = true
-			state.CurrentBlockType = "thinking"
-			state.CurrentOutputIndex = evt.OutputIndex
-			state.CurrentThinkingHadDelta = false
-			state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
-			events = append(events, AnthropicStreamEvent{
-				Type:  "content_block_start",
-				Index: &idx,
-				ContentBlock: &AnthropicContentBlock{
-					Type:     "thinking",
-					Thinking: "",
-				},
-			})
-		}
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	if !ok {
+		return nil
 	}
 
-	state.CurrentThinkingHadDelta = true
-	idx := state.ContentBlockIndex
-	events = append(events, AnthropicStreamEvent{
+	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
-		Index: &idx,
+		Index: &blockIdx,
 		Delta: &AnthropicDelta{
 			Type:     "thinking_delta",
 			Thinking: evt.Delta,
 		},
-	})
-	return events
+	}}
 }
 
 func resToAnthHandleBlockDone(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	if !state.ContentBlockOpen {
-		// Drop deferred empty thinking reservation without emitting events.
-		if state.CurrentBlockType == "thinking" && !state.CurrentThinkingHadDelta {
-			if state.CurrentOutputIndex >= 0 {
-				delete(state.OutputIndexToBlockIdx, state.CurrentOutputIndex)
-			}
-			state.CurrentBlockType = ""
-			state.CurrentOutputIndex = -1
-		}
 		return nil
-	}
-	// Suppress empty thinking blocks (start with no deltas). Claude Code's
-	// stream parser is sensitive to zero-content thinking start/stop pairs
-	// immediately followed by another content_block_start.
-	if state.CurrentBlockType == "thinking" && !state.CurrentThinkingHadDelta {
-		return abandonEmptyThinkingBlock(state)
 	}
 	return closeCurrentBlock(state)
 }
@@ -587,49 +502,9 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 		return resToAnthHandleWebSearchDone(evt, state)
 	}
 
-	// Only close the currently open block when this done event belongs to it.
-	// Unrelated output_item.done events (e.g. message done while tool is open,
-	// or a second done after arguments.done already closed the tool) must not
-	// close/re-close blocks — that produces stop for wrong index or double stop.
-	if !state.ContentBlockOpen {
-		// Clear deferred empty thinking reservation for this output index.
-		if state.CurrentBlockType == "thinking" &&
-			!state.CurrentThinkingHadDelta &&
-			(state.CurrentOutputIndex < 0 || state.CurrentOutputIndex == evt.OutputIndex) {
-			if state.CurrentOutputIndex >= 0 {
-				delete(state.OutputIndexToBlockIdx, state.CurrentOutputIndex)
-			}
-			state.CurrentBlockType = ""
-			state.CurrentOutputIndex = -1
-		}
-		return nil
-	}
-	if state.CurrentOutputIndex >= 0 && evt.OutputIndex != state.CurrentOutputIndex {
-		return nil
-	}
-	if state.CurrentBlockType == "thinking" && !state.CurrentThinkingHadDelta {
-		return abandonEmptyThinkingBlock(state)
-	}
-	return closeCurrentBlock(state)
-}
-
-// abandonEmptyThinkingBlock drops a thinking block that was opened but never
-// received a non-empty delta, without emitting content_block_stop. Callers must
-// only use this when the start event was never sent (deferred open) OR they
-// already know the client never received a start. For the deferred path we never
-// emit start; for the rare path where start was emitted with no deltas we still
-// emit stop to keep the client state machine balanced.
-func abandonEmptyThinkingBlock(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
-	// If ContentBlockOpen is true, a start was already sent — must stop it.
 	if state.ContentBlockOpen {
 		return closeCurrentBlock(state)
 	}
-	if state.CurrentOutputIndex >= 0 {
-		delete(state.OutputIndexToBlockIdx, state.CurrentOutputIndex)
-	}
-	state.CurrentBlockType = ""
-	state.CurrentOutputIndex = -1
-	state.CurrentThinkingHadDelta = false
 	return nil
 }
 
@@ -745,30 +620,14 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 
 func closeCurrentBlock(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	if !state.ContentBlockOpen {
-		// Still clear deferred empty thinking reservation so later blocks don't
-		// inherit a stale CurrentBlockType/output mapping.
-		if state.CurrentBlockType == "thinking" && !state.CurrentThinkingHadDelta {
-			if state.CurrentOutputIndex >= 0 {
-				delete(state.OutputIndexToBlockIdx, state.CurrentOutputIndex)
-			}
-			state.CurrentBlockType = ""
-			state.CurrentOutputIndex = -1
-			state.CurrentThinkingHadDelta = false
-		}
 		return nil
 	}
 	idx := state.ContentBlockIndex
-	if state.CurrentOutputIndex >= 0 {
-		delete(state.OutputIndexToBlockIdx, state.CurrentOutputIndex)
-	}
 	state.ContentBlockOpen = false
 	state.ContentBlockIndex++
-	state.CurrentBlockType = ""
-	state.CurrentOutputIndex = -1
 	state.CurrentToolName = ""
 	state.CurrentToolArgs = ""
 	state.CurrentToolHadDelta = false
-	state.CurrentThinkingHadDelta = false
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_stop",
 		Index: &idx,
