@@ -14,9 +14,9 @@ import (
 
 const (
 	grokQuotaUpstreamTimeout = 20 * time.Second
-	grokCLIClientVersion     = "0.2.99"
+	grokCLIClientVersion     = "0.2.101"
 	grokCLITokenAuth         = "xai-grok-cli"
-	grokCLIUserAgent         = "grok-shell/0.2.99 (windows; x86_64)"
+	grokCLIUserAgent         = "grok-shell/0.2.101 (windows; x86_64)"
 )
 
 type GrokMoneyValue struct {
