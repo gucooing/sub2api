@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,23 +42,35 @@ func (r *grokQuotaHandlerAccountRepo) UpdateExtra(_ context.Context, id int64, u
 }
 
 type grokQuotaHandlerUpstream struct {
-	resp      *http.Response
-	responses []*http.Response
-	lastReq   *http.Request
-	lastBody  []byte
+	mu       sync.Mutex
+	requests []*http.Request
+	bodies   [][]byte
 }
 
 func (u *grokQuotaHandlerUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
-	u.lastReq = req
+	var body []byte
 	if req.Body != nil {
-		u.lastBody, _ = io.ReadAll(req.Body)
+		body, _ = io.ReadAll(req.Body)
 	}
-	if len(u.responses) > 0 {
-		resp := u.responses[0]
-		u.responses = u.responses[1:]
-		return resp, nil
+	u.mu.Lock()
+	u.requests = append(u.requests, req)
+	u.bodies = append(u.bodies, body)
+	u.mu.Unlock()
+	if req.URL.Path == "/v1/responses" {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"X-Ratelimit-Limit-Requests":     []string{"10"},
+				"X-Ratelimit-Remaining-Requests": []string{"8"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"id":"resp_probe"}`)),
+		}, nil
 	}
-	return u.resp, nil
+	payload := `{"config":{"billingPeriodStart":"2026-07-01T00:00:00Z","billingPeriodEnd":"2026-08-01T00:00:00Z"}}`
+	if req.URL.RawQuery == "format=credits" {
+		payload = `{"config":{"currentPeriod":{"type":"WEEKLY","start":"2026-07-09T03:25:00Z","end":"2026-07-16T03:25:00Z"}}}`
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload))}, nil
 }
 
 func (u *grokQuotaHandlerUpstream) DoWithTLS(
@@ -81,23 +94,9 @@ func TestGrokOAuthHandlerQueryQuotaProbesUpstream(t *testing.T) {
 		Credentials: map[string]any{
 			"access_token": "access-token",
 			"expires_at":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-			"user_id":      "user-42",
 		},
 	}}
-	upstream := &grokQuotaHandlerUpstream{responses: []*http.Response{
-		{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{},
-			Body: io.NopCloser(strings.NewReader(
-				`{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"}}}`,
-			)),
-		},
-		{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{},
-			Body:       io.NopCloser(strings.NewReader(`{"config":{}}`)),
-		},
-	}}
+	upstream := &grokQuotaHandlerUpstream{}
 	quotaService := service.NewGrokQuotaService(repo, nil, service.NewGrokTokenProvider(repo, nil), upstream)
 	handler := NewGrokOAuthHandler(nil, nil, quotaService)
 
@@ -108,15 +107,23 @@ func TestGrokOAuthHandlerQueryQuotaProbesUpstream(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), `"source":"billing_api"`)
-	require.Contains(t, rec.Body.String(), `"headers_observed":false`)
+	require.Contains(t, rec.Body.String(), `"source":"hybrid_probe"`)
+	require.Contains(t, rec.Body.String(), `"billing":`)
+	require.Contains(t, rec.Body.String(), `"snapshot":`)
+	require.Contains(t, rec.Body.String(), `"headers_observed":true`)
 	require.NotContains(t, rec.Body.String(), "access-token")
-	require.Equal(t, xai.DefaultCLIBaseURL+"/billing", upstream.lastReq.URL.String())
-	require.Equal(t, http.MethodGet, upstream.lastReq.Method)
-	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
-	require.Equal(t, "xai-grok-cli", upstream.lastReq.Header.Get("X-XAI-Token-Auth"))
-	require.Equal(t, "user-42", upstream.lastReq.Header.Get("x-userid"))
-	require.Empty(t, upstream.lastBody)
+	upstream.mu.Lock()
+	requests := append([]*http.Request(nil), upstream.requests...)
+	bodies := append([][]byte(nil), upstream.bodies...)
+	upstream.mu.Unlock()
+	require.Len(t, requests, 3)
+	for i, upstreamReq := range requests {
+		require.Equal(t, "Bearer access-token", upstreamReq.Header.Get("Authorization"))
+		if upstreamReq.URL.String() == xai.DefaultCLIBaseURL+"/responses" {
+			require.Contains(t, string(bodies[i]), `"model":"grok-4.5"`)
+			require.Contains(t, string(bodies[i]), `"store":false`)
+		}
+	}
 	require.NotNil(t, repo.updates[42])
 }
 
@@ -160,4 +167,52 @@ func TestGrokOAuthHandlerRuntimeSanityDoesNotExposeSecrets(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "access_token")
 	require.NotContains(t, rec.Body.String(), "secret")
 	require.NotContains(t, rec.Body.String(), "client-secret-like-value")
+}
+
+func TestGrokSSOImportExpiryUsesTokenExpiryWithoutRefreshToken(t *testing.T) {
+	tokenExpiry := time.Now().Add(6 * time.Hour).Unix()
+	expiresAt, autoPause := grokSSOImportExpiry(nil, nil, &service.GrokTokenInfo{
+		ExpiresAt: tokenExpiry,
+	})
+
+	require.NotNil(t, expiresAt)
+	require.Equal(t, tokenExpiry, *expiresAt)
+	require.NotNil(t, autoPause)
+	require.True(t, *autoPause)
+}
+
+func TestGrokSSOImportExpiryUsesEarlierRequestedExpiryWithoutRefreshToken(t *testing.T) {
+	requestedExpiry := time.Now().Add(2 * time.Hour).Unix()
+	tokenExpiry := time.Now().Add(6 * time.Hour).Unix()
+	requestedAutoPause := false
+	expiresAt, autoPause := grokSSOImportExpiry(&requestedExpiry, &requestedAutoPause, &service.GrokTokenInfo{
+		ExpiresAt: tokenExpiry,
+	})
+
+	require.NotNil(t, expiresAt)
+	require.Equal(t, requestedExpiry, *expiresAt)
+	require.NotNil(t, autoPause)
+	require.True(t, *autoPause)
+}
+
+func TestGrokSSOImportExpiryPreservesRequestSettingsWithRefreshToken(t *testing.T) {
+	requestedExpiry := time.Now().Add(2 * time.Hour).Unix()
+	requestedAutoPause := false
+	expiresAt, autoPause := grokSSOImportExpiry(&requestedExpiry, &requestedAutoPause, &service.GrokTokenInfo{
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(6 * time.Hour).Unix(),
+	})
+
+	require.Same(t, &requestedExpiry, expiresAt)
+	require.Same(t, &requestedAutoPause, autoPause)
+}
+
+func TestGrokSSOImportWorkerRecoversPanic(t *testing.T) {
+	h := &GrokOAuthHandler{}
+	result := h.safeCreateAccountFromSSOToken(context.Background(), GrokSSOToOAuthRequest{}, "token", 2, 3)
+	// Without a service, createAccountFromSSOToken would panic on nil service access.
+	// Recovery must convert that into a failed item and keep the worker alive.
+	require.False(t, result.created)
+	require.Equal(t, 2, result.item.Index)
+	require.Contains(t, result.item.Error, "internal worker panic")
 }
