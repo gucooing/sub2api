@@ -482,6 +482,47 @@ func TestGrokQuotaServiceQueryQuotaFreeFallsBackToGrok45(t *testing.T) {
 	require.Equal(t, 1, responseCalls)
 }
 
+func TestGrokQuotaServiceQueryQuotaRateLimitedFreeAccountStillProbes(t *testing.T) {
+	t.Parallel()
+
+	account := healthyGrokQuotaOAuthAccount(58)
+	limitedAt := time.Now().Add(-time.Minute)
+	resetAt := time.Now().Add(time.Hour)
+	account.RateLimitedAt = &limitedAt
+	account.RateLimitResetAt = &resetAt
+	require.False(t, account.IsSchedulable())
+	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}}
+	upstream := &grokHybridUpstream{}
+	svc := NewGrokQuotaService(repo, nil, NewGrokTokenProvider(repo, nil), upstream)
+
+	result, err := svc.QueryQuota(context.Background(), account.ID)
+
+	require.NoError(t, err)
+	require.Equal(t, "hybrid_probe", result.Source)
+	require.NotNil(t, result.Billing)
+	require.NotNil(t, result.Snapshot)
+	require.NotNil(t, result.Snapshot.Tokens)
+	require.EqualValues(t, 2_000_000, *result.Snapshot.Tokens.Limit)
+
+	requests, _ := upstream.snapshot()
+	require.Len(t, requests, 3)
+	billingCalls := 0
+	activeCalls := 0
+	for _, req := range requests {
+		require.Equal(t, "Bearer access-token", req.Header.Get("Authorization"))
+		switch req.URL.Path {
+		case "/v1/billing":
+			billingCalls++
+		case "/v1/responses":
+			activeCalls++
+		}
+	}
+	require.Equal(t, 2, billingCalls)
+	require.Equal(t, 1, activeCalls)
+}
+
 func TestGrokQuotaServiceQueryQuotaPaidBillingSkipsActiveProbe(t *testing.T) {
 	t.Parallel()
 
