@@ -221,6 +221,97 @@ func TestOpenAIEnsureForwardErrorResponse_ResponsesRouteAfterWrittenEmitsRespons
 	assert.Contains(t, body, "Upstream request failed")
 }
 
+func TestOpenAIEnsureForwardErrorResponse_ImageJSONKeepaliveWritesSingleJSONFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+
+	stop := service.StartOpenAIImagesJSONKeepalive(c, 5*time.Millisecond)
+	defer stop()
+	before := service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c)
+	require.Eventually(t, c.Writer.Written, time.Second, time.Millisecond)
+	require.Equal(t, before, service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c))
+	require.False(t, openAIForwardErrorAlreadyCommunicated(c, before, errors.New("read upstream response: unexpected EOF")))
+
+	h := &OpenAIGatewayHandler{}
+	wrote := h.ensureForwardErrorResponse(c, false)
+
+	require.True(t, wrote)
+	require.Equal(t, http.StatusOK, w.Code, "heartbeat already committed the status")
+	require.True(t, json.Valid(w.Body.Bytes()), w.Body.String())
+	require.NotContains(t, w.Body.String(), "event:")
+	require.NotContains(t, w.Body.String(), "data:")
+
+	decoder := json.NewDecoder(strings.NewReader(w.Body.String()))
+	var payload map[string]any
+	require.NoError(t, decoder.Decode(&payload))
+	require.ErrorIs(t, decoder.Decode(&payload), io.EOF)
+	require.Equal(t, "upstream_error", gjson.Get(w.Body.String(), "error.type").String())
+	require.Equal(t, "Upstream request failed", gjson.Get(w.Body.String(), "error.message").String())
+}
+
+func TestOpenAIEnsureForwardErrorResponse_ImageJSONKeepalivePreservesCompletedJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+
+	stop := service.StartOpenAIImagesJSONKeepalive(c, 5*time.Millisecond)
+	defer stop()
+	before := service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c)
+	require.Eventually(t, c.Writer.Written, time.Second, time.Millisecond)
+	c.JSON(http.StatusOK, gin.H{"data": []gin.H{{"b64_json": "aW1hZ2U="}}})
+	completedBody := w.Body.String()
+	require.True(t, json.Valid([]byte(completedBody)), completedBody)
+	require.Greater(t, service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c), before)
+	require.False(t, openAIForwardErrorAlreadyCommunicated(c, before, errors.New("read upstream trailer: unexpected EOF")))
+
+	h := &OpenAIGatewayHandler{}
+	wrote := h.ensureForwardErrorResponse(c, false)
+
+	require.False(t, wrote, "the completed Images JSON already communicated the response")
+	require.Equal(t, completedBody, w.Body.String())
+	require.NotContains(t, w.Body.String(), "event:")
+	require.NotContains(t, w.Body.String(), "data:")
+
+	decoder := json.NewDecoder(strings.NewReader(w.Body.String()))
+	var payload map[string]any
+	require.NoError(t, decoder.Decode(&payload))
+	require.ErrorIs(t, decoder.Decode(&payload), io.EOF)
+	require.Equal(t, "aW1hZ2U=", gjson.Get(w.Body.String(), "data.0.b64_json").String())
+}
+
+func TestOpenAIEnsureForwardErrorResponse_FastImageJSONKeepalivePreservesCompletedJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+
+	stop := service.StartOpenAIImagesJSONKeepalive(c, time.Hour)
+	defer stop()
+	before := service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c)
+	c.JSON(http.StatusOK, gin.H{"data": []gin.H{{"b64_json": "ZmFzdC1pbWFnZQ=="}}})
+	completedBody := w.Body.String()
+	require.True(t, json.Valid([]byte(completedBody)), completedBody)
+	require.Greater(t, service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c), before)
+	require.False(t, openAIForwardErrorAlreadyCommunicated(c, before, errors.New("read upstream trailer: unexpected EOF")))
+
+	h := &OpenAIGatewayHandler{}
+	wrote := h.ensureForwardErrorResponse(c, false)
+
+	require.False(t, wrote, "fast completed Images JSON already communicated the response")
+	require.Equal(t, completedBody, w.Body.String())
+	require.NotContains(t, w.Body.String(), "event:")
+	require.NotContains(t, w.Body.String(), "data:")
+
+	decoder := json.NewDecoder(strings.NewReader(w.Body.String()))
+	var payload map[string]any
+	require.NoError(t, decoder.Decode(&payload))
+	require.ErrorIs(t, decoder.Decode(&payload), io.EOF)
+	require.Equal(t, "ZmFzdC1pbWFnZQ==", gjson.Get(w.Body.String(), "data.0.b64_json").String())
+}
+
 func TestShouldLogOpenAIForwardFailureAsWarn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -740,6 +831,40 @@ func TestOpenAIResponsesWebSocket_IngressCapacityRejected(t *testing.T) {
 	var closeErr coderws.CloseError
 	require.ErrorAs(t, err, &closeErr)
 	require.Equal(t, coderws.StatusTryAgainLater, closeErr.Code)
+}
+
+func TestOpenAIResponsesWebSocket_FirstMessageTimeoutUsesConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logSink, restore := captureHandlerStructuredLog(t)
+	defer restore()
+
+	h := newOpenAIHandlerForPreviousResponseIDValidation(t, nil)
+	h.cfg = &config.Config{}
+	h.cfg.Gateway.OpenAIWS.ClientFirstMessageTimeoutSeconds = 1
+	wsServer := newOpenAIWSHandlerTestServer(t, h, middleware.AuthSubject{UserID: 1, Concurrency: 1})
+	defer wsServer.Close()
+
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 3*time.Second)
+	clientConn, _, err := coderws.Dial(dialCtx, "ws"+strings.TrimPrefix(wsServer.URL, "http")+"/openai/v1/responses", nil)
+	cancelDial()
+	require.NoError(t, err)
+	defer func() { _ = clientConn.CloseNow() }()
+
+	started := time.Now()
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 5*time.Second)
+	_, _, err = clientConn.Read(readCtx)
+	cancelRead()
+	elapsed := time.Since(started)
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
+	require.GreaterOrEqual(t, elapsed, 500*time.Millisecond)
+	require.Less(t, elapsed, 4*time.Second)
+	require.Eventually(t, func() bool {
+		readTimeout, ok := logSink.FieldValueForMessage("openai.websocket_read_first_message_failed", "read_timeout")
+		return ok && readTimeout == time.Second &&
+			logSink.ContainsMessageAtLevel("openai.websocket_read_first_message_failed", "warn")
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestOpenAIResponsesWebSocket_IngressLeaseReleasedOnEarlyReturn(t *testing.T) {
