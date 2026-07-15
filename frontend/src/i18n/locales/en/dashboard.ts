@@ -516,6 +516,8 @@ export default {
     stats: {
       rebateRate: 'My Rebate Rate',
       rebateRateHint: 'What you earn each time an invitee recharges',
+      inviteBonus: 'Invite Signup Bonus',
+      inviteBonusHint: 'Bonus you receive immediately for each successful invite (available rebate quota)',
       invitedUsers: 'Invited Users',
       availableQuota: 'Available Rebate Quota',
       frozenQuota: 'Frozen',
@@ -545,7 +547,8 @@ export default {
       line1: 'Share your affiliate code or invite link with new users.',
       line2: 'When invitees recharge, you receive {rate} of the recharge as rebate quota.',
       line3: 'Transfer rebate quota to balance at any time.',
-      line4: 'Newly earned rebates may have a waiting period before they can be transferred.'
+      line4: 'Newly earned rebates may have a waiting period before they can be transferred.',
+      lineInviteBonus: 'Each successful invite credits you {amount} immediately into available rebate quota.'
     }
   },
 

@@ -145,6 +145,8 @@ export interface UserAffiliateDetail {
   aff_history_quota: number
   /** 当前用户作为邀请人时实际生效的返利比例（专属覆盖全局）。0-100。 */
   effective_rebate_rate_percent: number
+  /** 邀请得赠金：成功邀请一人后直接进入可转返利额度。0 表示关闭。 */
+  invite_bonus: number
   invitees: AffiliateInvitee[]
 }
 

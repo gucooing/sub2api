@@ -84,14 +84,15 @@ func TestApplyGrokCLIProxyHeaders(t *testing.T) {
 	})
 
 	t.Run("accepts a valid operator override", func(t *testing.T) {
-		t.Setenv("XAI_GROK_CLI_VERSION", "0.2.95-alpha.1")
+		// Must be >= grokCLIStableVersion (0.2.101); prereleases at the minimum are rejected.
+		t.Setenv("XAI_GROK_CLI_VERSION", "0.2.102")
 		req, err := http.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/chat/completions", nil)
 		require.NoError(t, err)
 
 		applyGrokCLIProxyHeaders(req)
 
-		require.Equal(t, "0.2.95-alpha.1", req.Header.Get("x-grok-client-version"))
-		require.Equal(t, "xai-grok-workspace/0.2.95-alpha.1", req.Header.Get("User-Agent"))
+		require.Equal(t, "0.2.102", req.Header.Get("x-grok-client-version"))
+		require.Equal(t, "xai-grok-workspace/0.2.102", req.Header.Get("User-Agent"))
 	})
 
 	t.Run("rejects an unsafe override", func(t *testing.T) {

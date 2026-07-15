@@ -521,6 +521,8 @@ export default {
     stats: {
       rebateRate: '我的返利比例',
       rebateRateHint: '被邀请用户每次充值后你可获得的返利比例',
+      inviteBonus: '邀请得赠金',
+      inviteBonusHint: '每成功邀请一位新用户，立即获得的赠金（进入可转返利额度）',
       invitedUsers: '邀请人数',
       availableQuota: '可转返利额度',
       frozenQuota: '冻结中',
@@ -550,7 +552,8 @@ export default {
       line1: '将邀请码或邀请链接分享给新用户。',
       line2: '被邀请用户充值后，你可获得 {rate} 的返利额度。',
       line3: '返利额度可随时转入账户余额。',
-      line4: '新产生的返利需要经过冻结期后才能提现。'
+      line4: '新产生的返利需要经过冻结期后才能提现。',
+      lineInviteBonus: '每成功邀请一位新用户注册，你将立即获得 {amount} 赠金（进入可转返利额度）。'
     }
   },
 

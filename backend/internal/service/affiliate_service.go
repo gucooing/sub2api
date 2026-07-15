@@ -91,7 +91,9 @@ type AffiliateDetail struct {
 	// 优先用户自己的专属比例（aff_rebate_rate_percent），否则回退到全局比例。
 	// 用于在用户的 /affiliate 页面直观展示「分享后能拿到多少」。
 	EffectiveRebateRatePercent float64            `json:"effective_rebate_rate_percent"`
-	Invitees                   []AffiliateInvitee `json:"invitees"`
+	// InviteBonus 是系统配置的「邀请得赠金」金额：成功邀请一人后直接进入可转返利额度。0 表示关闭。
+	InviteBonus float64 `json:"invite_bonus"`
+	Invitees    []AffiliateInvitee `json:"invitees"`
 }
 
 type AffiliateRepository interface {
@@ -262,6 +264,7 @@ func (s *AffiliateService) GetAffiliateDetail(ctx context.Context, userID int64)
 		AffFrozenQuota:             summary.AffFrozenQuota,
 		AffHistoryQuota:            summary.AffHistoryQuota,
 		EffectiveRebateRatePercent: s.resolveRebateRatePercent(ctx, summary),
+		InviteBonus:                s.inviteBonusAmount(ctx),
 		Invitees:                   invitees,
 	}, nil
 }
@@ -308,6 +311,9 @@ func (s *AffiliateService) BindInviterByCode(ctx context.Context, userID int64, 
 	if !bound {
 		return ErrAffiliateAlreadyBound
 	}
+	// 邀请得赠金：绑定成功后按配置金额直接计入邀请人的可转返利额度（freezeHours=0）。
+	// 失败不阻断注册/绑定结果；与充值返利共用 accrue 账本，计入 total_rebate。
+	s.tryAccrueInviteBonus(ctx, inviterSummary.UserID, userID)
 	return nil
 }
 
@@ -406,6 +412,38 @@ func (s *AffiliateService) globalRebateRatePercent(ctx context.Context) float64 
 		return AffiliateRebateRateDefault
 	}
 	return s.settingService.GetAffiliateRebateRatePercent(ctx)
+}
+
+// inviteBonusAmount reads the configured invite-signup bonus amount.
+func (s *AffiliateService) inviteBonusAmount(ctx context.Context) float64 {
+	if s == nil || s.settingService == nil {
+		return AffiliateInviteBonusDefault
+	}
+	return s.settingService.GetAffiliateInviteBonus(ctx)
+}
+
+// tryAccrueInviteBonus credits the inviter with a one-time invite bonus into
+// available rebate quota (no freeze), mirroring recharge rebate bookkeeping.
+func (s *AffiliateService) tryAccrueInviteBonus(ctx context.Context, inviterID, inviteeUserID int64) {
+	if s == nil || s.repo == nil || inviterID <= 0 || inviteeUserID <= 0 {
+		return
+	}
+	bonus := s.inviteBonusAmount(ctx)
+	if bonus <= 0 {
+		return
+	}
+	bonus = roundTo(bonus, 8)
+	if bonus <= 0 {
+		return
+	}
+	applied, err := s.repo.AccrueQuota(ctx, inviterID, inviteeUserID, bonus, 0, nil)
+	if err != nil {
+		logger.LegacyPrintf("service.affiliate", "[Affiliate] invite bonus accrue failed inviter=%d invitee=%d amount=%v: %v", inviterID, inviteeUserID, bonus, err)
+		return
+	}
+	if !applied {
+		logger.LegacyPrintf("service.affiliate", "[Affiliate] invite bonus not applied inviter=%d invitee=%d amount=%v", inviterID, inviteeUserID, bonus)
+	}
 }
 
 func (s *AffiliateService) TransferAffiliateQuota(ctx context.Context, userID int64) (float64, float64, error) {
