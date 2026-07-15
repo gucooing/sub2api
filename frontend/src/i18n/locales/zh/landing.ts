@@ -110,7 +110,9 @@ export default {
       button: '免费注册'
     },
     footer: {
-      allRightsReserved: '保留所有权利。'
+      allRightsReserved: '保留所有权利。',
+      openSource: '开源仓库',
+      openSourceNote: '基于开源项目'
     }
   },
 

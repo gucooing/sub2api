@@ -110,7 +110,9 @@ export default {
       button: 'Sign Up Free'
     },
     footer: {
-      allRightsReserved: 'All rights reserved.'
+      allRightsReserved: 'All rights reserved.',
+      openSource: 'Open Source',
+      openSourceNote: 'Based on'
     }
   },
 

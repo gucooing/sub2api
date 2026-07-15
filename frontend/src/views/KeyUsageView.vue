@@ -409,9 +409,21 @@
             target="_blank"
             rel="noopener noreferrer"
             class="text-sm text-gray-500 transition-colors hover:text-gray-700 dark:text-dark-400 dark:hover:text-white"
-          >GitHub</a>
+          >{{ t('home.footer.openSource') }}</a>
         </div>
       </div>
+      <p class="mx-auto mt-3 max-w-6xl text-center text-xs text-gray-400 dark:text-dark-500">
+        {{ t('home.footer.openSourceNote') }}
+        <a
+          :href="githubUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="underline decoration-gray-300 underline-offset-2 transition-colors hover:text-gray-600 dark:decoration-dark-600 dark:hover:text-dark-300"
+        >
+          {{ openSourceRepo }}
+        </a>
+        ({{ openSourceLicense }})
+      </p>
     </footer>
   </div>
 </template>
@@ -425,6 +437,11 @@ import Icon from '@/components/icons/Icon.vue'
 import { buildGatewayUrl } from '@/api/client'
 import { formatDateLocalInput } from '@/utils/format'
 import { sanitizeUrl } from '@/utils/url'
+import {
+  OPEN_SOURCE_LICENSE,
+  OPEN_SOURCE_REPO,
+  OPEN_SOURCE_URL
+} from '@/constants/openSource'
 
 const { t, locale } = useI18n()
 const appStore = useAppStore()
@@ -434,7 +451,9 @@ const appStore = useAppStore()
 const siteName = computed(() => appStore.cachedPublicSettings?.site_name || appStore.siteName || 'Sub2API')
 const siteLogo = computed(() => sanitizeUrl(appStore.cachedPublicSettings?.site_logo || appStore.siteLogo || '', { allowRelative: true, allowDataUrl: true }))
 const docUrl = computed(() => sanitizeUrl(appStore.cachedPublicSettings?.doc_url || appStore.docUrl || ''))
-const githubUrl = 'https://github.com/Wei-Shaw/sub2api'
+const githubUrl = OPEN_SOURCE_URL
+const openSourceRepo = OPEN_SOURCE_REPO
+const openSourceLicense = OPEN_SOURCE_LICENSE
 
 // ==================== Theme (same as HomeView) ====================
 

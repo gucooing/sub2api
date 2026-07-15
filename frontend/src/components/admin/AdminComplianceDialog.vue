@@ -106,6 +106,7 @@ import Input from '@/components/common/Input.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAdminComplianceStore, useAppStore, useAuthStore } from '@/stores'
 import { getLocale } from '@/i18n'
+import { OPEN_SOURCE_URL } from '@/constants/openSource'
 import zhDocument from '../../../../docs/legal/admin-compliance.zh.md?raw'
 import enDocument from '../../../../docs/legal/admin-compliance.en.md?raw'
 
@@ -115,6 +116,9 @@ const authStore = useAuthStore()
 const appStore = useAppStore()
 const typedPhrase = ref('')
 const attemptedSubmit = ref(false)
+
+const FALLBACK_DOC_URL_ZH = `${OPEN_SOURCE_URL}/blob/main/docs/legal/admin-compliance.zh.md`
+const FALLBACK_DOC_URL_EN = `${OPEN_SOURCE_URL}/blob/main/docs/legal/admin-compliance.en.md`
 
 marked.setOptions({
   breaks: true,
@@ -127,9 +131,9 @@ const canSubmit = computed(() => typedPhrase.value.trim() === expectedPhrase.val
 const currentDocument = computed(() => getLocale() === 'zh' ? zhDocument : enDocument)
 const documentUrl = computed(() => {
   if (getLocale() === 'zh') {
-    return complianceStore.status?.document_url_zh || 'https://github.com/Wei-Shaw/sub2api/blob/main/docs/legal/admin-compliance.zh.md'
+    return complianceStore.status?.document_url_zh || FALLBACK_DOC_URL_ZH
   }
-  return complianceStore.status?.document_url_en || 'https://github.com/Wei-Shaw/sub2api/blob/main/docs/legal/admin-compliance.en.md'
+  return complianceStore.status?.document_url_en || FALLBACK_DOC_URL_EN
 })
 const inputError = computed(() => {
   if (!attemptedSubmit.value || canSubmit.value) {

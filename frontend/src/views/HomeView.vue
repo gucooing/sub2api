@@ -396,10 +396,22 @@
             rel="noopener noreferrer"
             class="text-sm text-gray-500 transition-colors hover:text-gray-700 dark:text-dark-400 dark:hover:text-white"
           >
-            GitHub
+            {{ t('home.footer.openSource') }}
           </a>
         </div>
       </div>
+      <p class="mx-auto mt-3 max-w-6xl text-center text-xs text-gray-400 dark:text-dark-500">
+        {{ t('home.footer.openSourceNote') }}
+        <a
+          :href="githubUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="underline decoration-gray-300 underline-offset-2 transition-colors hover:text-gray-600 dark:decoration-dark-600 dark:hover:text-dark-300"
+        >
+          {{ openSourceRepo }}
+        </a>
+        ({{ openSourceLicense }})
+      </p>
     </footer>
   </div>
 </template>
@@ -411,6 +423,11 @@ import { useAuthStore, useAppStore } from '@/stores'
 import LocaleSwitcher from '@/components/common/LocaleSwitcher.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { sanitizeUrl } from '@/utils/url'
+import {
+  OPEN_SOURCE_LICENSE,
+  OPEN_SOURCE_REPO,
+  OPEN_SOURCE_URL
+} from '@/constants/openSource'
 
 const { t } = useI18n()
 
@@ -433,8 +450,10 @@ const isHomeContentUrl = computed(() => {
 // Theme
 const isDark = ref(document.documentElement.classList.contains('dark'))
 
-// GitHub URL
-const githubUrl = 'https://github.com/Wei-Shaw/sub2api'
+// This repository (LGPL-3.0)
+const githubUrl = OPEN_SOURCE_URL
+const openSourceRepo = OPEN_SOURCE_REPO
+const openSourceLicense = OPEN_SOURCE_LICENSE
 
 // Auth state
 const isAuthenticated = computed(() => authStore.isAuthenticated)

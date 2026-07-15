@@ -13,6 +13,7 @@ vi.mock('../client', () => ({
 }))
 
 import { getRollbackVersions, rollback, type RollbackVersionInfo } from '@/api/admin/system'
+import { OPEN_SOURCE_URL } from '@/constants/openSource'
 
 describe('admin system rollback API', () => {
   beforeEach(() => {
@@ -25,7 +26,7 @@ describe('admin system rollback API', () => {
       {
         version: '0.1.146',
         published_at: '2026-07-07T00:00:00Z',
-        html_url: 'https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.146'
+        html_url: `${OPEN_SOURCE_URL}/releases/tag/v0.1.146`
       }
     ]
     get.mockResolvedValue({ data: { versions } })

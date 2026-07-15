@@ -3,6 +3,7 @@ import { defineComponent, h } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 
 import SettingsView from "../SettingsView.vue";
+import { OPEN_SOURCE_URL } from "@/constants/openSource";
 
 const {
   getSettings,
@@ -620,10 +621,10 @@ describe("admin SettingsView payment visible method controls", () => {
 
     expect(paymentLinks).toHaveLength(2);
     expect(paymentLinks[0]?.attributes("href")).toBe(
-      "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT_CN.md",
+      `${OPEN_SOURCE_URL}/blob/main/docs/PAYMENT_CN.md`,
     );
     expect(paymentLinks[1]?.attributes("href")).toBe(
-      "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT_CN.md#支持的支付方式",
+      `${OPEN_SOURCE_URL}/blob/main/docs/PAYMENT_CN.md#支持的支付方式`,
     );
     for (const link of paymentLinks) {
       expect(link.attributes("href")).toContain("docs/PAYMENT");

@@ -153,9 +153,9 @@
                   {{ t('nav.apiKeys') }}
                 </router-link>
 
+                <!-- Open-source repository attribution (LGPL-3.0) -->
                 <a
-                  v-if="authStore.isAdmin"
-                  href="https://github.com/Wei-Shaw/sub2api"
+                  :href="openSourceUrl"
                   target="_blank"
                   rel="noopener noreferrer"
                   @click="closeDropdown"
@@ -250,6 +250,7 @@ import SubscriptionProgressMini from '@/components/common/SubscriptionProgressMi
 import AnnouncementBell from '@/components/common/AnnouncementBell.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { sanitizeUrl } from '@/utils/url'
+import { OPEN_SOURCE_URL } from '@/constants/openSource'
 
 const router = useRouter()
 const route = useRoute()
@@ -259,6 +260,7 @@ const authStore = useAuthStore()
 const adminSettingsStore = useAdminSettingsStore()
 const onboardingStore = useOnboardingStore()
 
+const openSourceUrl = OPEN_SOURCE_URL
 const user = computed(() => authStore.user)
 const dropdownOpen = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)

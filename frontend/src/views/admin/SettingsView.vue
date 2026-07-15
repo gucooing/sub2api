@@ -7417,6 +7417,7 @@ import {
   defaultFingerprintSignalRows,
   type FingerprintSignalRow,
 } from "./codexFingerprintSignals";
+import { OPEN_SOURCE_URL } from "@/constants/openSource";
 
 const { t, locale } = useI18n();
 const appStore = useAppStore();
@@ -7429,14 +7430,14 @@ function localText(zh: string, en: string): string {
 
 const paymentGuideHref = computed(() =>
   locale.value.startsWith("zh")
-    ? "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT_CN.md"
-    : "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT.md",
+    ? `${OPEN_SOURCE_URL}/blob/main/docs/PAYMENT_CN.md`
+    : `${OPEN_SOURCE_URL}/blob/main/docs/PAYMENT.md`,
 );
 
 const paymentMethodsHref = computed(() =>
   locale.value.startsWith("zh")
-    ? "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT_CN.md#支持的支付方式"
-    : "https://github.com/Wei-Shaw/sub2api/blob/main/docs/PAYMENT.md#supported-payment-methods",
+    ? `${OPEN_SOURCE_URL}/blob/main/docs/PAYMENT_CN.md#支持的支付方式`
+    : `${OPEN_SOURCE_URL}/blob/main/docs/PAYMENT.md#supported-payment-methods`,
 );
 
 type SettingsTab =
