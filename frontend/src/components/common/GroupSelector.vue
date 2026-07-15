@@ -28,7 +28,7 @@
         v-for="group in filteredGroups"
         :key="group.id"
         class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 transition-colors hover:bg-white dark:hover:bg-dark-700"
-        :title="t('admin.groups.rateAndAccounts', { rate: group.rate_multiplier, count: group.account_count || 0 })"
+        :title="groupTitle(group)"
       >
         <input
           type="checkbox"
@@ -42,6 +42,10 @@
           :platform="group.platform"
           :subscription-type="group.subscription_type"
           :rate-multiplier="group.rate_multiplier"
+          :peak-rate-enabled="group.peak_rate_enabled"
+          :peak-start="group.peak_start"
+          :peak-end="group.peak_end"
+          :peak-rate-multiplier="group.peak_rate_multiplier"
           class="min-w-0 flex-1"
         />
         <span class="shrink-0 text-xs text-gray-400">{{ group.account_count || 0 }}</span>
@@ -62,8 +66,15 @@ import { useI18n } from 'vue-i18n'
 import GroupBadge from './GroupBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
 import type { AdminGroup, GroupPlatform } from '@/types'
+import { useAppStore } from '@/stores/app'
+import {
+  hasPeakRate,
+  formatPeakRateWindow,
+  serverTimezoneLabel,
+} from '@/utils/peak-rate'
 
 const { t } = useI18n()
+const appStore = useAppStore()
 
 interface Props {
   modelValue: number[]
@@ -115,5 +126,18 @@ const handleChange = (groupId: number, checked: boolean) => {
     ? [...props.modelValue, groupId]
     : props.modelValue.filter((id) => id !== groupId)
   emit('update:modelValue', newValue)
+}
+
+const groupTitle = (group: AdminGroup) => {
+  const base = t('admin.groups.rateAndAccounts', {
+    rate: group.rate_multiplier,
+    count: group.account_count || 0,
+  })
+  if (!hasPeakRate(group)) return base
+  const peak = formatPeakRateWindow(
+    group,
+    serverTimezoneLabel(appStore.cachedPublicSettings?.server_utc_offset),
+  )
+  return `${base} · ${t('common.peakRateTooltip', { window: peak })}`
 }
 </script>

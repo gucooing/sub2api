@@ -249,10 +249,35 @@
             </div>
           </template>
 
-          <template #cell-rate_multiplier="{ value }">
-            <span class="text-sm text-gray-700 dark:text-gray-300"
-              >{{ value }}x</span
-            >
+          <template #cell-rate_multiplier="{ row, value }">
+            <div class="space-y-0.5">
+              <span class="text-sm text-gray-700 dark:text-gray-300"
+                >{{ value }}x</span
+              >
+              <div
+                v-if="hasPeakRate(row)"
+                class="text-xs font-medium text-amber-700 dark:text-amber-300"
+                :title="
+                  t('common.peakRateTooltip', {
+                    window: formatPeakRateWindow(
+                      row,
+                      serverTimezoneLabel(
+                        appStore.cachedPublicSettings?.server_utc_offset,
+                      ),
+                    ),
+                  }) + t('common.peakRateImageNote')
+                "
+              >
+                {{
+                  formatPeakRateWindow(
+                    row,
+                    serverTimezoneLabel(
+                      appStore.cachedPublicSettings?.server_utc_offset,
+                    ),
+                  )
+                }}
+              </div>
+            </div>
           </template>
 
           <template #cell-is_exclusive="{ value }">
@@ -1067,8 +1092,8 @@
           </div>
         </div>
 
-        <!-- 高峰时段倍率配置（仅订阅类型分组） -->
-        <div v-if="createForm.subscription_type === 'subscription'" class="border-t pt-4">
+        <!-- 高峰时段倍率配置（标准 / 订阅分组均可） -->
+        <div class="border-t pt-4">
           <div class="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2">
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
               <input
@@ -2581,8 +2606,8 @@
           </div>
         </div>
 
-        <!-- 高峰时段倍率配置（仅订阅类型分组） -->
-        <div v-if="editForm.subscription_type === 'subscription'" class="border-t pt-4">
+        <!-- 高峰时段倍率配置（标准 / 订阅分组均可） -->
+        <div class="border-t pt-4">
           <div class="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2">
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
               <input
@@ -3583,6 +3608,11 @@ import GroupRPMOverridesModal from "@/components/admin/group/GroupRPMOverridesMo
 import GroupCapacityBadge from "@/components/common/GroupCapacityBadge.vue";
 import { VueDraggable } from "vue-draggable-plus";
 import { createStableObjectKeyResolver } from "@/utils/stableObjectKey";
+import {
+  hasPeakRate,
+  formatPeakRateWindow,
+  serverTimezoneLabel,
+} from "@/utils/peak-rate";
 import { useKeyedDebouncedSearch } from "@/composables/useKeyedDebouncedSearch";
 import { getPersistedPageSize } from "@/composables/usePersistedPageSize";
 import {
@@ -5148,31 +5178,14 @@ const confirmDelete = async () => {
   }
 };
 
-// 监听 subscription_type 变化，订阅模式时 is_exclusive 默认为 true；标准模式清空高峰配置
+// 监听 subscription_type 变化：订阅模式时 is_exclusive 默认为 true。
+// 高峰倍率配置在标准/订阅间切换时保留，不再清空。
 watch(
   () => createForm.subscription_type,
   (newVal) => {
     if (newVal === "subscription") {
       createForm.is_exclusive = true;
       createForm.fallback_group_id_on_invalid_request = null;
-    } else {
-      createForm.peak_rate_enabled = false;
-      createForm.peak_start = "";
-      createForm.peak_end = "";
-      createForm.peak_rate_multiplier = 1.0;
-    }
-  },
-);
-
-// 编辑表单：切回标准模式时清空高峰配置，避免残留随更新请求提交被后端拒绝
-watch(
-  () => editForm.subscription_type,
-  (newVal) => {
-    if (newVal !== "subscription") {
-      editForm.peak_rate_enabled = false;
-      editForm.peak_start = "";
-      editForm.peak_end = "";
-      editForm.peak_rate_multiplier = 1.0;
     }
   },
 );
