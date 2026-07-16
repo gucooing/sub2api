@@ -24,15 +24,29 @@ var (
 	errGrokOAuthConfiguredProxyMiss  = errors.New("grok oauth configured proxy is missing")
 )
 
-type grokQuotaProbeTokenAccessKey struct{}
+// grokAdminTokenAccessKey marks administrative token access paths (quota probe,
+// account model test, manual refresh diagnostics). These paths must still be
+// able to refresh and obtain credentials while the account is rate-limited or
+// otherwise temporarily unschedulable. Gateway request scheduling stays strict.
+type grokAdminTokenAccessKey struct{}
 
+func withGrokAdminTokenAccess(ctx context.Context) context.Context {
+	return context.WithValue(ctx, grokAdminTokenAccessKey{}, true)
+}
+
+// withGrokQuotaProbeTokenAccess is retained for call sites/tests that predate
+// the broader admin-token helper.
 func withGrokQuotaProbeTokenAccess(ctx context.Context) context.Context {
-	return context.WithValue(ctx, grokQuotaProbeTokenAccessKey{}, true)
+	return withGrokAdminTokenAccess(ctx)
+}
+
+func isGrokAdminTokenAccess(ctx context.Context) bool {
+	admin, _ := ctx.Value(grokAdminTokenAccessKey{}).(bool)
+	return admin
 }
 
 func isGrokQuotaProbeTokenAccess(ctx context.Context) bool {
-	quotaProbe, _ := ctx.Value(grokQuotaProbeTokenAccessKey{}).(bool)
-	return quotaProbe
+	return isGrokAdminTokenAccess(ctx)
 }
 
 type GrokTokenCache = GeminiTokenCache
@@ -74,10 +88,18 @@ func (p *GrokTokenProvider) GetAccessToken(ctx context.Context, account *Account
 	return p.getAccessToken(ctx, account)
 }
 
+// GetAccessTokenForAdmin allows administrative flows (quota probe, model test,
+// token diagnostics) to obtain/refresh credentials without schedulability gates
+// such as rate-limit windows, temp unschedulable cooldowns, or manual pause.
+// The account must still be a Grok OAuth account with usable credentials/proxy.
+func (p *GrokTokenProvider) GetAccessTokenForAdmin(ctx context.Context, account *Account) (string, error) {
+	return p.getAccessToken(withGrokAdminTokenAccess(ctx), account)
+}
+
 // GetAccessTokenForQuotaProbe allows an administrative quota probe to inspect
 // an account during its rate-limit window without relaxing normal scheduling.
 func (p *GrokTokenProvider) GetAccessTokenForQuotaProbe(ctx context.Context, account *Account) (string, error) {
-	return p.getAccessToken(withGrokQuotaProbeTokenAccess(ctx), account)
+	return p.GetAccessTokenForAdmin(ctx, account)
 }
 
 func (p *GrokTokenProvider) getAccessToken(ctx context.Context, account *Account) (string, error) {
@@ -267,20 +289,22 @@ func grokOAuthRequestAccountEligibilityError(account *Account) error {
 }
 
 func grokOAuthRequestAccountEligibilityErrorForContext(ctx context.Context, account *Account) error {
-	return grokOAuthRequestAccountEligibilityErrorWithMode(account, isGrokQuotaProbeTokenAccess(ctx))
+	return grokOAuthRequestAccountEligibilityErrorWithMode(account, isGrokAdminTokenAccess(ctx))
 }
 
-func grokOAuthRequestAccountEligibilityErrorWithMode(account *Account, ignoreRateLimit bool) error {
+func grokOAuthRequestAccountEligibilityErrorWithMode(account *Account, adminBypassSchedulability bool) error {
 	if account == nil || !account.IsGrokOAuth() {
 		return errOAuthRefreshAccountStateChanged
 	}
-	eligibilityAccount := account
-	if ignoreRateLimit && account.RateLimitResetAt != nil {
-		snapshot := *account
-		snapshot.RateLimitResetAt = nil
-		eligibilityAccount = &snapshot
-	}
-	if !eligibilityAccount.IsSchedulable() {
+	// Admin diagnostics (model test / quota probe) must still refresh tokens and
+	// hit upstream regardless of rate-limit, overload, temp-unschedulable, or
+	// manual Schedulable=false. Gateway traffic continues to require IsSchedulable.
+	// Disabled/error/deleted accounts remain blocked so we never re-arm dead rows.
+	if adminBypassSchedulability {
+		if !account.IsActive() {
+			return errOAuthRefreshAccountStateChanged
+		}
+	} else if !account.IsSchedulable() {
 		return errOAuthRefreshAccountStateChanged
 	}
 	if account.ProxyID != nil && account.Proxy == nil {

@@ -496,7 +496,7 @@ func TestGrokQuotaServiceQueryQuotaRateLimitedFreeAccountStillProbes(t *testing.
 		accountsByID: map[int64]*Account{account.ID: account},
 	}}
 	upstream := &grokHybridUpstream{}
-	svc := NewGrokQuotaService(repo, nil, NewGrokTokenProvider(repo, nil), upstream)
+	svc := NewGrokQuotaService(repo, nil, NewGrokTokenProvider(repo, nil), upstream, nil)
 
 	result, err := svc.QueryQuota(context.Background(), account.ID)
 

@@ -723,8 +723,10 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 		if s.grokTokenProvider == nil {
 			return s.sendErrorAndEnd(c, "Grok token provider not configured")
 		}
+		// Admin model test must not be blocked by rate-limit / temp unschedulable
+		// windows; surface the real upstream response (including 429) instead.
 		var err error
-		authToken, err = s.grokTokenProvider.GetAccessToken(ctx, account)
+		authToken, err = s.grokTokenProvider.GetAccessTokenForAdmin(ctx, account)
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to get Grok access token: %s", err.Error()))
 		}
