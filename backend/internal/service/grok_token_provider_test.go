@@ -124,6 +124,131 @@ func TestGrokTokenProviderRefreshesExpiredTokenOnRequestPath(t *testing.T) {
 	require.Equal(t, 1, cache.releaseCalls)
 }
 
+func TestGrokTokenProviderQuotaProbeRefreshesRateLimitedToken(t *testing.T) {
+	t.Setenv(xai.EnvBaseURL, xai.DefaultCLIBaseURL)
+
+	resetAt := time.Now().Add(time.Hour)
+	account := &Account{
+		ID:               61,
+		Platform:         PlatformGrok,
+		Type:             AccountTypeOAuth,
+		Status:           StatusActive,
+		Schedulable:      true,
+		RateLimitResetAt: &resetAt,
+		Credentials: map[string]any{
+			"access_token":  "expired-access-token",
+			"refresh_token": "refresh-token",
+			"expires_at":    time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+			"base_url":      xai.DefaultCLIBaseURL,
+			"client_id":     "client-id",
+		},
+	}
+	repo := &tokenRefreshAccountRepo{}
+	repo.accountsByID = map[int64]*Account{account.ID: account}
+	cache := &grokTokenCacheForProviderTest{lockResult: true}
+	oauthSvc := NewGrokOAuthService(nil, &grokOAuthClientStub{
+		refreshResponse: &xai.TokenResponse{
+			AccessToken: "quota-probe-access-token",
+			TokenType:   "Bearer",
+			ExpiresIn:   3600,
+		},
+	})
+	defer oauthSvc.Stop()
+
+	provider := NewGrokTokenProvider(repo, cache)
+	provider.SetRefreshAPI(NewOAuthRefreshAPI(repo, cache), NewGrokTokenRefresher(oauthSvc))
+
+	token, err := provider.GetAccessToken(context.Background(), account)
+	require.ErrorIs(t, err, errOAuthRefreshAccountStateChanged)
+	require.Empty(t, token)
+	require.Zero(t, repo.updateCredentialsCalls)
+
+	token, err = provider.GetAccessTokenForQuotaProbe(context.Background(), account)
+	require.NoError(t, err)
+	require.Equal(t, "quota-probe-access-token", token)
+	require.Equal(t, 1, repo.updateCredentialsCalls)
+	require.Equal(t, "quota-probe-access-token", repo.accountsByID[account.ID].GetGrokAccessToken())
+	require.NotNil(t, repo.accountsByID[account.ID].RateLimitResetAt)
+}
+
+func TestGrokTokenProviderAdminBypassesSchedulabilityGates(t *testing.T) {
+	t.Setenv(xai.EnvBaseURL, xai.DefaultCLIBaseURL)
+
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
+	tests := []struct {
+		name   string
+		mutate func(*Account)
+	}{
+		{name: "rate limited", mutate: func(account *Account) { account.RateLimitResetAt = &future }},
+		{name: "not schedulable", mutate: func(account *Account) { account.Schedulable = false }},
+		{name: "temporarily unschedulable", mutate: func(account *Account) { account.TempUnschedulableUntil = &future }},
+		{name: "overloaded", mutate: func(account *Account) { account.OverloadUntil = &future }},
+		{name: "expired account", mutate: func(account *Account) {
+			account.AutoPauseOnExpired = true
+			account.ExpiresAt = &past
+		}},
+	}
+
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := expiredGrokOAuthAccountForCredentialTest(int64(120 + index))
+			tt.mutate(account)
+			repo := &tokenRefreshAccountRepo{}
+			repo.accountsByID = map[int64]*Account{account.ID: account}
+			cache := &grokTokenCacheForProviderTest{lockResult: true}
+			oauthSvc := NewGrokOAuthService(nil, &grokOAuthClientStub{
+				refreshResponse: &xai.TokenResponse{
+					AccessToken: "admin-access-token",
+					TokenType:   "Bearer",
+					ExpiresIn:   3600,
+				},
+			})
+			defer oauthSvc.Stop()
+			provider := NewGrokTokenProvider(repo, cache)
+			provider.SetRefreshAPI(NewOAuthRefreshAPI(repo, cache), NewGrokTokenRefresher(oauthSvc))
+
+			token, err := provider.GetAccessToken(context.Background(), account)
+			require.ErrorIs(t, err, errOAuthRefreshAccountStateChanged)
+			require.Empty(t, token)
+
+			token, err = provider.GetAccessTokenForAdmin(context.Background(), account)
+			require.NoError(t, err)
+			require.Equal(t, "admin-access-token", token)
+			require.Equal(t, 1, repo.updateCredentialsCalls)
+		})
+	}
+}
+
+func TestGrokTokenProviderAdminStillRejectsInactiveAccounts(t *testing.T) {
+	future := time.Now().Add(time.Hour)
+	tests := []struct {
+		name   string
+		mutate func(*Account)
+	}{
+		{name: "disabled", mutate: func(account *Account) { account.Status = StatusDisabled }},
+		{name: "error", mutate: func(account *Account) { account.Status = StatusError }},
+	}
+
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := expiredGrokOAuthAccountForCredentialTest(int64(140 + index))
+			account.Credentials["access_token"] = "warm-cache-token"
+			account.Credentials["expires_at"] = time.Now().Add(2 * grokTokenRefreshSkew).UTC().Format(time.RFC3339)
+			account.RateLimitResetAt = &future
+			tt.mutate(account)
+			cache := &grokTokenCacheForProviderTest{token: "warm-cache-token"}
+			provider := NewGrokTokenProvider(&tokenRefreshAccountRepo{}, cache)
+
+			token, err := provider.GetAccessTokenForAdmin(context.Background(), account)
+
+			require.ErrorIs(t, err, errOAuthRefreshAccountStateChanged)
+			require.Empty(t, token)
+			require.Zero(t, cache.getCalls, "admin token access must still reject inactive accounts before cache lookup")
+		})
+	}
+}
+
 func TestGrokTokenProviderRefreshFailureUnschedulesWithRedactedReason(t *testing.T) {
 	expiredAt := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
 	account := &Account{

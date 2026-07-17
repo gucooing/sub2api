@@ -24,6 +24,31 @@ var (
 	errGrokOAuthConfiguredProxyMiss  = errors.New("grok oauth configured proxy is missing")
 )
 
+// grokAdminTokenAccessKey marks administrative token access paths (quota probe,
+// account model test, manual refresh diagnostics). These paths must still be
+// able to refresh and obtain credentials while the account is rate-limited or
+// otherwise temporarily unschedulable. Gateway request scheduling stays strict.
+type grokAdminTokenAccessKey struct{}
+
+func withGrokAdminTokenAccess(ctx context.Context) context.Context {
+	return context.WithValue(ctx, grokAdminTokenAccessKey{}, true)
+}
+
+// withGrokQuotaProbeTokenAccess is retained for call sites/tests that predate
+// the broader admin-token helper.
+func withGrokQuotaProbeTokenAccess(ctx context.Context) context.Context {
+	return withGrokAdminTokenAccess(ctx)
+}
+
+func isGrokAdminTokenAccess(ctx context.Context) bool {
+	admin, _ := ctx.Value(grokAdminTokenAccessKey{}).(bool)
+	return admin
+}
+
+func isGrokQuotaProbeTokenAccess(ctx context.Context) bool {
+	return isGrokAdminTokenAccess(ctx)
+}
+
 type GrokTokenCache = GeminiTokenCache
 
 type GrokTokenProvider struct {
@@ -60,6 +85,24 @@ func (p *GrokTokenProvider) SetTempUnschedCache(cache TempUnschedCache) {
 }
 
 func (p *GrokTokenProvider) GetAccessToken(ctx context.Context, account *Account) (string, error) {
+	return p.getAccessToken(ctx, account)
+}
+
+// GetAccessTokenForAdmin allows administrative flows (quota probe, model test,
+// token diagnostics) to obtain/refresh credentials without schedulability gates
+// such as rate-limit windows, temp unschedulable cooldowns, or manual pause.
+// The account must still be a Grok OAuth account with usable credentials/proxy.
+func (p *GrokTokenProvider) GetAccessTokenForAdmin(ctx context.Context, account *Account) (string, error) {
+	return p.getAccessToken(withGrokAdminTokenAccess(ctx), account)
+}
+
+// GetAccessTokenForQuotaProbe allows an administrative quota probe to inspect
+// an account during its rate-limit window without relaxing normal scheduling.
+func (p *GrokTokenProvider) GetAccessTokenForQuotaProbe(ctx context.Context, account *Account) (string, error) {
+	return p.GetAccessTokenForAdmin(ctx, account)
+}
+
+func (p *GrokTokenProvider) getAccessToken(ctx context.Context, account *Account) (string, error) {
 	if account == nil {
 		return "", errors.New("account is nil")
 	}
@@ -67,7 +110,7 @@ func (p *GrokTokenProvider) GetAccessToken(ctx context.Context, account *Account
 		return "", errors.New("not a grok oauth account")
 	}
 	selectedProxyID := cloneGrokProxyID(account.ProxyID)
-	if eligibilityErr := grokOAuthRequestAccountEligibilityError(account); eligibilityErr != nil {
+	if eligibilityErr := grokOAuthRequestAccountEligibilityErrorForContext(ctx, account); eligibilityErr != nil {
 		return "", withGrokCredentialFailureSnapshot(eligibilityErr, account)
 	}
 
@@ -111,7 +154,7 @@ func (p *GrokTokenProvider) GetAccessToken(ctx context.Context, account *Account
 				return "", withGrokCredentialFailureSnapshot(errGrokOAuthAccessTokenExpired, account)
 			}
 		} else if result != nil && result.Account != nil {
-			if eligibilityErr := grokOAuthRequestAccountEligibilityError(result.Account); eligibilityErr != nil {
+			if eligibilityErr := grokOAuthRequestAccountEligibilityErrorForContext(ctx, result.Account); eligibilityErr != nil {
 				return "", withGrokCredentialFailureSnapshot(eligibilityErr, result.Account)
 			}
 			if !grokCredentialProxyIDsEqual(result.Account.ProxyID, selectedProxyID) {
@@ -133,7 +176,7 @@ func (p *GrokTokenProvider) GetAccessToken(ctx context.Context, account *Account
 	if p.tokenCache != nil {
 		latestAccount, isStale := CheckTokenVersion(ctx, account, p.accountRepo)
 		if isStale && latestAccount != nil {
-			if eligibilityErr := grokOAuthRequestAccountEligibilityError(latestAccount); eligibilityErr != nil {
+			if eligibilityErr := grokOAuthRequestAccountEligibilityErrorForContext(ctx, latestAccount); eligibilityErr != nil {
 				return "", withGrokCredentialFailureSnapshot(eligibilityErr, latestAccount)
 			}
 			if !grokCredentialProxyIDsEqual(latestAccount.ProxyID, selectedProxyID) {
@@ -195,7 +238,7 @@ func (p *GrokTokenProvider) waitForRefreshedToken(ctx context.Context, account *
 				return "", errOAuthRefreshAccountStateChanged
 			} else {
 				sawAuthoritativeState = true
-				if eligibilityErr := grokOAuthRequestAccountEligibilityError(latest); eligibilityErr != nil {
+				if eligibilityErr := grokOAuthRequestAccountEligibilityErrorForContext(ctx, latest); eligibilityErr != nil {
 					return "", withGrokCredentialFailureSnapshot(eligibilityErr, latest)
 				}
 				if !grokCredentialProxyIDsEqual(latest.ProxyID, selectedProxyID) {
@@ -242,7 +285,26 @@ func (p *GrokTokenProvider) waitForRefreshedToken(ctx context.Context, account *
 }
 
 func grokOAuthRequestAccountEligibilityError(account *Account) error {
-	if account == nil || !account.IsGrokOAuth() || !account.IsSchedulable() {
+	return grokOAuthRequestAccountEligibilityErrorWithMode(account, false)
+}
+
+func grokOAuthRequestAccountEligibilityErrorForContext(ctx context.Context, account *Account) error {
+	return grokOAuthRequestAccountEligibilityErrorWithMode(account, isGrokAdminTokenAccess(ctx))
+}
+
+func grokOAuthRequestAccountEligibilityErrorWithMode(account *Account, adminBypassSchedulability bool) error {
+	if account == nil || !account.IsGrokOAuth() {
+		return errOAuthRefreshAccountStateChanged
+	}
+	// Admin diagnostics (model test / quota probe) must still refresh tokens and
+	// hit upstream regardless of rate-limit, overload, temp-unschedulable, or
+	// manual Schedulable=false. Gateway traffic continues to require IsSchedulable.
+	// Disabled/error/deleted accounts remain blocked so we never re-arm dead rows.
+	if adminBypassSchedulability {
+		if !account.IsActive() {
+			return errOAuthRefreshAccountStateChanged
+		}
+	} else if !account.IsSchedulable() {
 		return errOAuthRefreshAccountStateChanged
 	}
 	if account.ProxyID != nil && account.Proxy == nil {
