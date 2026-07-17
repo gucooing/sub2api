@@ -41,12 +41,17 @@ func (r *apiKeyRepository) activeQuery() *dbent.APIKeyQuery {
 }
 
 func (r *apiKeyRepository) Create(ctx context.Context, key *service.APIKey) error {
+	// Keep group_id dual-written from GroupIDs.
+	groupIDs := service.NormalizeGroupIDs(key.EffectiveGroupIDs())
+	key.ApplyGroupIDs(groupIDs)
+
 	builder := r.client.APIKey.Create().
 		SetUserID(key.UserID).
 		SetKey(key.Key).
 		SetName(key.Name).
 		SetStatus(key.Status).
 		SetNillableGroupID(key.GroupID).
+		SetGroupIds(groupIDs).
 		SetNillableLastUsedAt(key.LastUsedAt).
 		SetQuota(key.Quota).
 		SetQuotaUsed(key.QuotaUsed).
@@ -68,6 +73,7 @@ func (r *apiKeyRepository) Create(ctx context.Context, key *service.APIKey) erro
 		key.LastUsedAt = created.LastUsedAt
 		key.CreatedAt = created.CreatedAt
 		key.UpdatedAt = created.UpdatedAt
+		key.GroupIDs = created.GroupIds
 	}
 	return translatePersistenceError(err, nil, service.ErrAPIKeyExists)
 }
@@ -132,6 +138,7 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 			apikey.FieldID,
 			apikey.FieldUserID,
 			apikey.FieldGroupID,
+			apikey.FieldGroupIds,
 			apikey.FieldName,
 			apikey.FieldStatus,
 			apikey.FieldIPWhitelist,
@@ -240,11 +247,15 @@ func (r *apiKeyRepository) Update(ctx context.Context, key *service.APIKey) erro
 		SetUsage1d(key.Usage1d).
 		SetUsage7d(key.Usage7d).
 		SetUpdatedAt(now)
+	// Dual-write group_id + group_ids from the ordered chain.
+	groupIDs := service.NormalizeGroupIDs(key.EffectiveGroupIDs())
+	key.ApplyGroupIDs(groupIDs)
 	if key.GroupID != nil {
 		builder.SetGroupID(*key.GroupID)
 	} else {
 		builder.ClearGroupID()
 	}
+	builder.SetGroupIds(groupIDs)
 
 	// Expiration time
 	if key.ExpiresAt != nil {
@@ -671,23 +682,79 @@ func (r *apiKeyRepository) SearchAPIKeys(ctx context.Context, userID int64, keyw
 	return outKeys, nil
 }
 
-// ClearGroupIDByGroupID 将指定分组的所有 API Key 的 group_id 设为 nil
+// ClearGroupIDByGroupID 将指定分组从所有 API Key 的 group_ids 中移除，并 dual-write group_id。
+// 当主分组被清掉时：若仍有兜底组则提升为首项，否则解绑。
+// Group delete is rare; scan active keys and rewrite any list that contains the ID.
 func (r *apiKeyRepository) ClearGroupIDByGroupID(ctx context.Context, groupID int64) (int64, error) {
-	n, err := r.client.APIKey.Update().
-		Where(apikey.GroupIDEQ(groupID), apikey.DeletedAtIsNil()).
-		ClearGroupID().
-		Save(ctx)
-	return int64(n), err
+	ms, err := r.activeQuery().All(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	var updated int64
+	for _, m := range ms {
+		if m == nil {
+			continue
+		}
+		svc := apiKeyEntityToService(m)
+		if svc == nil {
+			continue
+		}
+		ids := service.NormalizeGroupIDs(svc.EffectiveGroupIDs())
+		next := make([]int64, 0, len(ids))
+		for _, id := range ids {
+			if id != groupID {
+				next = append(next, id)
+			}
+		}
+		if len(next) == len(ids) {
+			continue
+		}
+		svc.ApplyGroupIDs(next)
+		if err := r.Update(ctx, svc); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
 }
 
-// UpdateGroupIDByUserAndGroup 将用户下绑定 oldGroupID 的所有 Key 迁移到 newGroupID
+// UpdateGroupIDByUserAndGroup 将用户下绑定 oldGroupID 的所有 Key 迁移到 newGroupID（含 group_ids 替换）。
 func (r *apiKeyRepository) UpdateGroupIDByUserAndGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (int64, error) {
 	client := clientFromContext(ctx, r.client)
-	n, err := client.APIKey.Update().
-		Where(apikey.UserIDEQ(userID), apikey.GroupIDEQ(oldGroupID), apikey.DeletedAtIsNil()).
-		SetGroupID(newGroupID).
-		Save(ctx)
-	return int64(n), err
+	// Load all user keys and rewrite any occurrence of oldGroupID in the ordered list.
+	ms, err := client.APIKey.Query().
+		Where(apikey.UserIDEQ(userID), apikey.DeletedAtIsNil()).
+		All(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var updated int64
+	for _, m := range ms {
+		svc := apiKeyEntityToService(m)
+		if svc == nil {
+			continue
+		}
+		ids := service.NormalizeGroupIDs(svc.EffectiveGroupIDs())
+		changed := false
+		for i, id := range ids {
+			if id == oldGroupID {
+				ids[i] = newGroupID
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+		// Deduplicate after replace while preserving first occurrence order.
+		ids = service.NormalizeGroupIDs(ids)
+		svc.ApplyGroupIDs(ids)
+		if err := r.Update(ctx, svc); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
 }
 
 // CountByGroupID 获取分组的 API Key 数量
@@ -848,6 +915,7 @@ func apiKeyEntityToService(m *dbent.APIKey) *service.APIKey {
 		CreatedAt:     m.CreatedAt,
 		UpdatedAt:     m.UpdatedAt,
 		GroupID:       m.GroupID,
+		GroupIDs:      append([]int64(nil), m.GroupIds...),
 		Quota:         m.Quota,
 		QuotaUsed:     m.QuotaUsed,
 		ExpiresAt:     m.ExpiresAt,
@@ -860,6 +928,10 @@ func apiKeyEntityToService(m *dbent.APIKey) *service.APIKey {
 		Window5hStart: m.Window5hStart,
 		Window1dStart: m.Window1dStart,
 		Window7dStart: m.Window7dStart,
+	}
+	// Heal legacy rows: group_id set but group_ids empty.
+	if len(out.GroupIDs) == 0 && out.GroupID != nil && *out.GroupID > 0 {
+		out.GroupIDs = []int64{*out.GroupID}
 	}
 	if m.Edges.User != nil {
 		out.User = userEntityToService(m.Edges.User)

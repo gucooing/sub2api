@@ -563,6 +563,22 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		fallbackGroupID = apiKey.Group.FallbackGroupIDOnInvalidRequest
 	}
 	fallbackUsed := false
+	groupCursor := NewGroupFallbackCursor(
+		c.Request.Context(),
+		apiKey,
+		func(ctx context.Context, groupID int64) (*service.Group, error) {
+			return h.gatewayService.ResolveGroupByID(ctx, groupID)
+		},
+		nil,
+	)
+	if groupCursor != nil {
+		if cur := groupCursor.CurrentAPIKey(c.Request.Context()); cur != nil {
+			currentAPIKey = cur
+			if currentAPIKey.Group != nil {
+				fallbackGroupID = currentAPIKey.Group.FallbackGroupIDOnInvalidRequest
+			}
+		}
+	}
 
 	// 单账号分组提前设置 SingleAccountRetry 标记，让 Service 层首次 503 就不设模型限流标记。
 	// 避免单账号分组收到 503 (MODEL_CAPACITY_EXHAUSTED) 时设 29s 限流，导致后续请求连续快速失败。
@@ -592,6 +608,26 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
 			if err != nil {
 				if len(fs.FailedAccountIDs) == 0 {
+					if groupCursor != nil {
+						if ok, reason := groupCursor.Advance(c.Request.Context()); ok {
+							nextKey := groupCursor.CurrentAPIKey(c.Request.Context())
+							if nextKey != nil {
+								reqLog.Warn("gateway.group_fallback_advance",
+									zap.String("reason", reason),
+									zap.Int64p("from_group_id", currentAPIKey.GroupID),
+									zap.Int64p("to_group_id", nextKey.GroupID),
+									zap.String("trigger", "no_available_accounts"),
+								)
+								currentAPIKey = nextKey
+								currentSubscription = nil
+								if currentAPIKey.Group != nil {
+									fallbackGroupID = currentAPIKey.Group.FallbackGroupIDOnInvalidRequest
+								}
+								fs.ResetForNextGroup()
+								continue
+							}
+						}
+					}
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -879,6 +915,26 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					case FailoverContinue:
 						continue
 					case FailoverExhausted:
+						if groupCursor != nil {
+							if ok, reason := groupCursor.Advance(c.Request.Context()); ok {
+								nextKey := groupCursor.CurrentAPIKey(c.Request.Context())
+								if nextKey != nil {
+									reqLog.Warn("gateway.group_fallback_advance",
+										zap.String("reason", reason),
+										zap.Int64p("from_group_id", currentAPIKey.GroupID),
+										zap.Int64p("to_group_id", nextKey.GroupID),
+										zap.String("trigger", "account_failover_exhausted"),
+									)
+									currentAPIKey = nextKey
+									currentSubscription = nil
+									if currentAPIKey.Group != nil {
+										fallbackGroupID = currentAPIKey.Group.FallbackGroupIDOnInvalidRequest
+									}
+									fs.ResetForNextGroup()
+									continue
+								}
+							}
+						}
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, account.Platform, streamStarted)
 						return
 					case FailoverCanceled:

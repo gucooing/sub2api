@@ -829,8 +829,9 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 
 	if *groupID == 0 {
 		// 0 表示解绑分组（不修改 user_allowed_groups，避免影响用户其他 Key）
-		apiKey.GroupID = nil
+		apiKey.ApplyGroupIDs(nil)
 		apiKey.Group = nil
+		apiKey.Groups = nil
 	} else {
 		// 验证目标分组存在且状态为 active
 		group, err := s.groupRepo.GetByID(ctx, *groupID)
@@ -854,8 +855,9 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 		}
 
 		gid := *groupID
-		apiKey.GroupID = &gid
+		apiKey.ApplyGroupIDs([]int64{gid})
 		apiKey.Group = group
+		apiKey.Groups = []*Group{group}
 
 		// 专属标准分组：使用事务保证「添加分组权限」与「更新 API Key」的原子性
 		if group.IsExclusive && !group.IsSubscriptionType() {
@@ -909,6 +911,115 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 		s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.Key)
 	}
 
+	result.APIKey = apiKey
+	return result, nil
+}
+
+// AdminUpdateAPIKeyGroupIDs replaces the ordered fallback group chain for an API key.
+// Empty groupIDs unbinds all groups. Exclusive groups are auto-granted for the key owner.
+func (s *adminServiceImpl) AdminUpdateAPIKeyGroupIDs(ctx context.Context, keyID int64, groupIDs []int64) (*AdminUpdateAPIKeyGroupIDResult, error) {
+	apiKey, err := s.apiKeyRepo.GetByID(ctx, keyID)
+	if err != nil {
+		return nil, err
+	}
+
+	ids := NormalizeGroupIDs(groupIDs)
+	if len(ids) > MaxAPIKeyFallbackGroups {
+		return nil, infraerrors.BadRequest("TOO_MANY_GROUP_IDS", fmt.Sprintf("at most %d groups allowed", MaxAPIKeyFallbackGroups))
+	}
+
+	result := &AdminUpdateAPIKeyGroupIDResult{}
+	if len(ids) == 0 {
+		apiKey.ApplyGroupIDs(nil)
+		apiKey.Group = nil
+		apiKey.Groups = nil
+		if err := s.apiKeyRepo.Update(ctx, apiKey); err != nil {
+			return nil, fmt.Errorf("update api key: %w", err)
+		}
+		if s.authCacheInvalidator != nil {
+			s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.Key)
+		}
+		result.APIKey = apiKey
+		return result, nil
+	}
+
+	groups := make([]*Group, 0, len(ids))
+	var platform string
+	for i, id := range ids {
+		group, err := s.groupRepo.GetByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if group.Status != StatusActive {
+			return nil, infraerrors.BadRequest("GROUP_NOT_ACTIVE", "target group is not active")
+		}
+		if i == 0 {
+			platform = group.Platform
+		} else if group.Platform != platform {
+			return nil, infraerrors.BadRequest("GROUP_PLATFORM_MISMATCH", "all fallback groups must share the same platform")
+		}
+		if group.IsSubscriptionType() {
+			if s.userSubRepo == nil {
+				return nil, infraerrors.InternalServer("SUBSCRIPTION_REPOSITORY_UNAVAILABLE", "subscription repository is not configured")
+			}
+			if _, err := s.userSubRepo.GetActiveByUserIDAndGroupID(ctx, apiKey.UserID, id); err != nil {
+				if errors.Is(err, ErrSubscriptionNotFound) {
+					return nil, infraerrors.BadRequest("SUBSCRIPTION_REQUIRED", "user does not have an active subscription for this group")
+				}
+				return nil, err
+			}
+		}
+		groups = append(groups, group)
+	}
+
+	apiKey.ApplyGroupIDs(ids)
+	apiKey.Group = groups[0]
+	apiKey.Groups = groups
+
+	opCtx := ctx
+	var tx *dbent.Tx
+	needsGrant := false
+	for _, g := range groups {
+		if g.IsExclusive && !g.IsSubscriptionType() {
+			needsGrant = true
+			break
+		}
+	}
+	if needsGrant && s.entClient != nil {
+		var txErr error
+		tx, txErr = s.entClient.Tx(ctx)
+		if txErr != nil {
+			return nil, fmt.Errorf("begin transaction: %w", txErr)
+		}
+		defer func() { _ = tx.Rollback() }()
+		opCtx = dbent.NewTxContext(ctx, tx)
+	}
+
+	for _, g := range groups {
+		if g.IsExclusive && !g.IsSubscriptionType() {
+			if addErr := s.userRepo.AddGroupToAllowedGroups(opCtx, apiKey.UserID, g.ID); addErr != nil {
+				return nil, fmt.Errorf("add group to user allowed groups: %w", addErr)
+			}
+			if !result.AutoGrantedGroupAccess {
+				gid := g.ID
+				result.AutoGrantedGroupAccess = true
+				result.GrantedGroupID = &gid
+				result.GrantedGroupName = g.Name
+			}
+		}
+	}
+
+	if err := s.apiKeyRepo.Update(opCtx, apiKey); err != nil {
+		return nil, fmt.Errorf("update api key: %w", err)
+	}
+	if tx != nil {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit transaction: %w", err)
+		}
+	}
+	if s.authCacheInvalidator != nil {
+		s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.Key)
+	}
 	result.APIKey = apiKey
 	return result, nil
 }

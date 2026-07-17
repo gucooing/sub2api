@@ -666,12 +666,24 @@ func (s *stubAdminService) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 			k := s.apiKeys[i]
 			if groupID != nil {
 				if *groupID == 0 {
-					k.GroupID = nil
+					k.ApplyGroupIDs(nil)
 				} else {
-					gid := *groupID
-					k.GroupID = &gid
+					k.ApplyGroupIDs([]int64{*groupID})
 				}
 			}
+			s.apiKeys[i] = k
+			return &service.AdminUpdateAPIKeyGroupIDResult{APIKey: &k}, nil
+		}
+	}
+	return nil, service.ErrAPIKeyNotFound
+}
+
+func (s *stubAdminService) AdminUpdateAPIKeyGroupIDs(ctx context.Context, keyID int64, groupIDs []int64) (*service.AdminUpdateAPIKeyGroupIDResult, error) {
+	for i := range s.apiKeys {
+		if s.apiKeys[i].ID == keyID {
+			k := s.apiKeys[i]
+			k.ApplyGroupIDs(service.NormalizeGroupIDs(groupIDs))
+			s.apiKeys[i] = k
 			return &service.AdminUpdateAPIKeyGroupIDResult{APIKey: &k}, nil
 		}
 	}

@@ -27,17 +27,23 @@
                 :disabled="updatingKeyIds.has(key.id)"
               >
                 <GroupBadge
-                  v-if="key.group_id && key.group"
-                  :name="key.group.name"
-                  :platform="key.group.platform"
-                  :subscription-type="key.group.subscription_type"
-                  :rate-multiplier="key.group.rate_multiplier"
-                  :peak-rate-enabled="key.group.peak_rate_enabled"
-                  :peak-start="key.group.peak_start"
-                  :peak-end="key.group.peak_end"
-                  :peak-rate-multiplier="key.group.peak_rate_multiplier"
+                  v-if="displayGroup(key)"
+                  :name="displayGroup(key)!.name"
+                  :platform="displayGroup(key)!.platform"
+                  :subscription-type="displayGroup(key)!.subscription_type"
+                  :rate-multiplier="displayGroup(key)!.rate_multiplier"
+                  :peak-rate-enabled="displayGroup(key)!.peak_rate_enabled"
+                  :peak-start="displayGroup(key)!.peak_start"
+                  :peak-end="displayGroup(key)!.peak_end"
+                  :peak-rate-multiplier="displayGroup(key)!.peak_rate_multiplier"
                 />
                 <span v-else class="text-gray-400 italic">{{ t('admin.users.none') }}</span>
+                <span
+                  v-if="fallbackCount(key) > 0"
+                  class="inline-flex shrink-0 items-center rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-dark-700 dark:text-dark-300"
+                >
+                  +{{ fallbackCount(key) }}
+                </span>
                 <svg v-if="updatingKeyIds.has(key.id)" class="h-3 w-3 animate-spin text-primary-500" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
                 <svg v-else class="h-3 w-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 15L12 18.75 15.75 15m-7.5-6L12 5.25 15.75 9" /></svg>
               </button>
@@ -63,14 +69,14 @@
           @click="changeGroup(selectedKeyForGroup!, null)"
           :class="[
             'flex w-full items-center rounded-lg px-3 py-2 text-sm transition-colors',
-            !selectedKeyForGroup?.group_id
+            !(selectedKeyForGroup && resolveGroupIds(selectedKeyForGroup)[0])
               ? 'bg-primary-50 dark:bg-primary-900/20'
               : 'hover:bg-gray-100 dark:hover:bg-dark-700'
           ]"
         >
           <span class="text-gray-500 italic">{{ t('admin.users.none') }}</span>
           <svg
-            v-if="!selectedKeyForGroup?.group_id"
+            v-if="!(selectedKeyForGroup && resolveGroupIds(selectedKeyForGroup)[0])"
             class="ml-auto h-4 w-4 shrink-0 text-primary-600 dark:text-primary-400"
             fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"
           ><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
@@ -82,7 +88,9 @@
           @click="changeGroup(selectedKeyForGroup!, group.id)"
           :class="[
             'flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors',
-            selectedKeyForGroup?.group_id === group.id
+            (selectedKeyForGroup
+              ? (resolveGroupIds(selectedKeyForGroup)[0] ?? null)
+              : null) === group.id
               ? 'bg-primary-50 dark:bg-primary-900/20'
               : 'hover:bg-gray-100 dark:hover:bg-dark-700'
           ]"
@@ -97,7 +105,11 @@
             :peak-end="group.peak_end"
             :peak-rate-multiplier="group.peak_rate_multiplier"
             :description="group.description"
-            :selected="selectedKeyForGroup?.group_id === group.id"
+            :selected="
+              (selectedKeyForGroup
+                ? (resolveGroupIds(selectedKeyForGroup)[0] ?? null)
+                : null) === group.id
+            "
           />
         </button>
       </div>
@@ -135,6 +147,23 @@ const selectedKeyForGroup = computed(() => {
   if (groupSelectorKeyId.value === null) return null
   return apiKeys.value.find((k) => k.id === groupSelectorKeyId.value) || null
 })
+
+const resolveGroupIds = (key: ApiKey): number[] => {
+  if (key.group_ids?.length) return key.group_ids
+  if (key.group_id != null) return [key.group_id]
+  return []
+}
+
+const displayGroup = (key: ApiKey) => {
+  if (key.groups?.length) return key.groups[0]
+  if (key.group) return key.group
+  return null
+}
+
+const fallbackCount = (key: ApiKey): number => {
+  const n = resolveGroupIds(key).length
+  return n > 1 ? n - 1 : 0
+}
 
 const setGroupButtonRef = (keyId: number, el: Element | ComponentPublicInstance | null) => {
   if (el instanceof HTMLElement) {
@@ -204,11 +233,16 @@ const closeGroupSelector = () => {
 
 const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
   closeGroupSelector()
-  if (key.group_id === newGroupId || (!key.group_id && newGroupId === null)) return
+  const currentPrimary = resolveGroupIds(key)[0] ?? null
+  if (currentPrimary === newGroupId) return
 
   updatingKeyIds.value.add(key.id)
   try {
-    const result = await adminAPI.apiKeys.updateApiKeyGroup(key.id, newGroupId)
+    // Admin inline picker still sets a single primary group; client dual-writes group_ids when supported.
+    const result = await adminAPI.apiKeys.updateApiKeyGroup(
+      key.id,
+      newGroupId == null ? null : [newGroupId]
+    )
     // Update local data
     const idx = apiKeys.value.findIndex((k) => k.id === key.id)
     if (idx !== -1) {

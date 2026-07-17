@@ -44,6 +44,11 @@ func (APIKey) Fields() []ent.Field {
 		field.Int64("group_id").
 			Optional().
 			Nillable(),
+		// Ordered fallback group IDs. group_id is always dual-written as group_ids[0]
+		// (or null when empty) for filters, FK edge, and legacy clients.
+		field.JSON("group_ids", []int64{}).
+			Optional().
+			Comment("Ordered fallback group IDs; group_id is always group_ids[0]"),
 		field.String("status").
 			MaxLen(20).
 			Default(domain.StatusActive),

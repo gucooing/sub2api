@@ -589,7 +589,10 @@ export interface ApiKey {
   user_id: number
   key: string
   name: string
+  /** Primary group (always equals group_ids[0] when set) */
   group_id: number | null
+  /** Ordered fallback chain; first entry is the primary group */
+  group_ids?: number[]
   status: 'active' | 'inactive' | 'quota_exhausted' | 'expired'
   ip_whitelist: string[]
   ip_blacklist: string[]
@@ -601,7 +604,10 @@ export interface ApiKey {
   created_at: string
   updated_at: string
   current_concurrency: number
+  /** Primary group (legacy / convenience) */
   group?: Group
+  /** Ordered groups matching group_ids when hydrated by the API */
+  groups?: Group[]
   rate_limit_5h: number
   rate_limit_1d: number
   rate_limit_7d: number
@@ -618,7 +624,10 @@ export interface ApiKey {
 
 export interface CreateApiKeyRequest {
   name: string
+  /** @deprecated Prefer group_ids; kept for backward compatibility */
   group_id?: number | null
+  /** Ordered fallback chain (preferred); first entry is primary */
+  group_ids?: number[]
   custom_key?: string // Optional custom API Key
   ip_whitelist?: string[]
   ip_blacklist?: string[]
@@ -631,7 +640,10 @@ export interface CreateApiKeyRequest {
 
 export interface UpdateApiKeyRequest {
   name?: string
+  /** @deprecated Prefer group_ids; kept for backward compatibility */
   group_id?: number | null
+  /** Ordered fallback chain; when present, replaces the full chain */
+  group_ids?: number[]
   status?: 'active' | 'inactive'
   ip_whitelist?: string[]
   ip_blacklist?: string[]

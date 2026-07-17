@@ -27,12 +27,17 @@ func IsWindowExpired(windowStart *time.Time, duration time.Duration) bool {
 	return windowStart == nil || time.Since(*windowStart) >= duration
 }
 
+// MaxAPIKeyFallbackGroups is the maximum number of ordered fallback groups per API key.
+const MaxAPIKeyFallbackGroups = 5
+
 type APIKey struct {
 	ID          int64
 	UserID      int64
 	Key         string
 	Name        string
 	GroupID     *int64
+	// GroupIDs is the ordered fallback chain. GroupID is always dual-written as GroupIDs[0].
+	GroupIDs    []int64
 	Status      string
 	IPWhitelist []string
 	IPBlacklist []string
@@ -45,6 +50,8 @@ type APIKey struct {
 	UpdatedAt           time.Time
 	User                *User
 	Group               *Group
+	// Groups is an optional ordered hydrate of GroupIDs (auth cache / multi-group failover).
+	Groups              []*Group
 	CurrentConcurrency  int
 
 	// Quota fields
@@ -141,5 +148,57 @@ func (k *APIKey) EffectiveUsage7d() float64 {
 type APIKeyListFilters struct {
 	Search  string
 	Status  string
-	GroupID *int64 // nil=不筛选, 0=无分组, >0=指定分组
+	GroupID *int64 // nil=不筛选, 0=无分组, >0=指定分组（主分组 group_id）
+}
+
+// EffectiveGroupIDs returns the ordered fallback group chain for this key.
+// Prefers GroupIDs; falls back to GroupID for legacy rows not yet dual-written.
+func (k *APIKey) EffectiveGroupIDs() []int64 {
+	if k == nil {
+		return nil
+	}
+	if len(k.GroupIDs) > 0 {
+		return k.GroupIDs
+	}
+	if k.GroupID != nil && *k.GroupID > 0 {
+		return []int64{*k.GroupID}
+	}
+	return nil
+}
+
+// ApplyGroupIDs dual-writes GroupIDs and GroupID (first element / nil when empty).
+func (k *APIKey) ApplyGroupIDs(ids []int64) {
+	if k == nil {
+		return
+	}
+	if len(ids) == 0 {
+		k.GroupIDs = []int64{}
+		k.GroupID = nil
+		return
+	}
+	out := make([]int64, len(ids))
+	copy(out, ids)
+	k.GroupIDs = out
+	first := out[0]
+	k.GroupID = &first
+}
+
+// NormalizeGroupIDs deduplicates while preserving order and drops non-positive IDs.
+func NormalizeGroupIDs(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return []int64{}
+	}
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }

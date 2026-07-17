@@ -48,7 +48,7 @@ export async function getById(id: number): Promise<ApiKey> {
 /**
  * Create new API key
  * @param name - Key name
- * @param groupId - Optional group ID
+ * @param groupIdOrIds - Primary group ID, ordered group_ids, or null
  * @param customKey - Optional custom key value
  * @param ipWhitelist - Optional IP whitelist
  * @param ipBlacklist - Optional IP blacklist
@@ -59,7 +59,7 @@ export async function getById(id: number): Promise<ApiKey> {
  */
 export async function create(
   name: string,
-  groupId?: number | null,
+  groupIdOrIds?: number | number[] | null,
   customKey?: string,
   ipWhitelist?: string[],
   ipBlacklist?: string[],
@@ -68,9 +68,20 @@ export async function create(
   rateLimitData?: { rate_limit_5h?: number; rate_limit_1d?: number; rate_limit_7d?: number }
 ): Promise<ApiKey> {
   const payload: CreateApiKeyRequest = { name }
-  if (groupId !== undefined) {
-    payload.group_id = groupId
+
+  if (Array.isArray(groupIdOrIds)) {
+    if (groupIdOrIds.length > 0) {
+      payload.group_ids = groupIdOrIds
+      // Dual-write primary for older backends / consumers
+      payload.group_id = groupIdOrIds[0]
+    }
+  } else if (groupIdOrIds !== undefined) {
+    payload.group_id = groupIdOrIds
+    if (groupIdOrIds != null) {
+      payload.group_ids = [groupIdOrIds]
+    }
   }
+
   if (customKey) {
     payload.custom_key = customKey
   }
@@ -107,7 +118,15 @@ export async function create(
  * @returns Updated API key
  */
 export async function update(id: number, updates: UpdateApiKeyRequest): Promise<ApiKey> {
-  const { data } = await apiClient.put<ApiKey>(`/keys/${id}`, updates)
+  // Keep group_id in sync when only group_ids is provided (compat dual-write)
+  const payload: UpdateApiKeyRequest = { ...updates }
+  if (payload.group_ids !== undefined && payload.group_ids.length > 0 && payload.group_id === undefined) {
+    payload.group_id = payload.group_ids[0]
+  } else if (payload.group_id !== undefined && payload.group_ids === undefined && payload.group_id != null) {
+    payload.group_ids = [payload.group_id]
+  }
+
+  const { data } = await apiClient.put<ApiKey>(`/keys/${id}`, payload)
   return data
 }
 

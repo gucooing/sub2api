@@ -29,6 +29,9 @@ var (
 	ErrAPIKeyInvalidChars = infraerrors.BadRequest("API_KEY_INVALID_CHARS", "api key can only contain letters, numbers, underscores, and hyphens")
 	ErrAPIKeyRateLimited  = infraerrors.TooManyRequests("API_KEY_RATE_LIMITED", "too many failed attempts, please try again later")
 	ErrInvalidIPPattern   = infraerrors.BadRequest("INVALID_IP_PATTERN", "invalid IP or CIDR pattern")
+	ErrGroupIDsRequired   = infraerrors.BadRequest("GROUP_IDS_REQUIRED", "at least one group is required")
+	ErrTooManyGroupIDs    = infraerrors.BadRequest("TOO_MANY_GROUP_IDS", fmt.Sprintf("at most %d groups allowed", MaxAPIKeyFallbackGroups))
+	ErrGroupPlatformMismatch = infraerrors.BadRequest("GROUP_PLATFORM_MISMATCH", "all fallback groups must share the same platform")
 	// ErrAPIKeyExpired        = infraerrors.Forbidden("API_KEY_EXPIRED", "api key has expired")
 	ErrAPIKeyExpired = infraerrors.Forbidden("API_KEY_EXPIRED", "api key 已过期")
 	// ErrAPIKeyQuotaExhausted = infraerrors.TooManyRequests("API_KEY_QUOTA_EXHAUSTED", "api key quota exhausted")
@@ -159,8 +162,9 @@ type APIKeyAuthCacheInvalidator interface {
 // CreateAPIKeyRequest 创建API Key请求
 type CreateAPIKeyRequest struct {
 	Name        string   `json:"name"`
-	GroupID     *int64   `json:"group_id"`
-	CustomKey   *string  `json:"custom_key"`   // 可选的自定义key
+	GroupID     *int64   `json:"group_id"`  // legacy single group; used when GroupIDs is nil
+	GroupIDs    []int64  `json:"group_ids"`  // ordered fallback chain (preferred)
+	CustomKey   *string  `json:"custom_key"` // 可选的自定义key
 	IPWhitelist []string `json:"ip_whitelist"` // IP 白名单
 	IPBlacklist []string `json:"ip_blacklist"` // IP 黑名单
 
@@ -177,7 +181,9 @@ type CreateAPIKeyRequest struct {
 // UpdateAPIKeyRequest 更新API Key请求
 type UpdateAPIKeyRequest struct {
 	Name        *string  `json:"name"`
-	GroupID     *int64   `json:"group_id"`
+	GroupID     *int64   `json:"group_id"`  // legacy; used when GroupIDs is nil and GroupID != nil
+	GroupIDs    []int64  `json:"group_ids"` // ordered fallback chain; empty slice means "no change" for users unless SetGroupIDs
+	SetGroupIDs bool     `json:"-"`         // true when client explicitly sent group_ids
 	Status      *string  `json:"status"`
 	IPWhitelist []string `json:"ip_whitelist"` // IP 白名单（空数组清空）
 	IPBlacklist []string `json:"ip_blacklist"` // IP 黑名单（空数组清空）
@@ -339,6 +345,65 @@ func (s *APIKeyService) canUserBindGroup(ctx context.Context, user *User, group 
 	return user.CanBindGroup(group.ID, group.IsExclusive)
 }
 
+// resolveCreateGroupIDs prefers group_ids; falls back to legacy group_id.
+func resolveCreateGroupIDs(req CreateAPIKeyRequest) []int64 {
+	if req.GroupIDs != nil {
+		return NormalizeGroupIDs(req.GroupIDs)
+	}
+	if req.GroupID != nil && *req.GroupID > 0 {
+		return []int64{*req.GroupID}
+	}
+	return []int64{}
+}
+
+// resolveUpdateGroupIDs returns (ids, changed). Prefers explicit group_ids.
+func resolveUpdateGroupIDs(req UpdateAPIKeyRequest) (ids []int64, changed bool) {
+	if req.SetGroupIDs {
+		return NormalizeGroupIDs(req.GroupIDs), true
+	}
+	if req.GroupID != nil {
+		if *req.GroupID <= 0 {
+			return []int64{}, true
+		}
+		return []int64{*req.GroupID}, true
+	}
+	return nil, false
+}
+
+// validateAndLoadGroupIDs loads groups, checks bind permission and same platform.
+// requireAtLeastOne rejects empty lists (user path).
+func (s *APIKeyService) validateAndLoadGroupIDs(ctx context.Context, user *User, ids []int64, requireAtLeastOne bool) ([]*Group, error) {
+	ids = NormalizeGroupIDs(ids)
+	if len(ids) == 0 {
+		if requireAtLeastOne {
+			return nil, ErrGroupIDsRequired
+		}
+		return nil, nil
+	}
+	if len(ids) > MaxAPIKeyFallbackGroups {
+		return nil, ErrTooManyGroupIDs
+	}
+
+	groups := make([]*Group, 0, len(ids))
+	var platform string
+	for i, id := range ids {
+		group, err := s.groupRepo.GetByID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("get group %d: %w", id, err)
+		}
+		if !s.canUserBindGroup(ctx, user, group) {
+			return nil, ErrGroupNotAllowed
+		}
+		if i == 0 {
+			platform = group.Platform
+		} else if group.Platform != platform {
+			return nil, ErrGroupPlatformMismatch
+		}
+		groups = append(groups, group)
+	}
+	return groups, nil
+}
+
 // Create 创建API Key
 func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIKeyRequest) (*APIKey, error) {
 	// 验证用户存在
@@ -361,18 +426,12 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 		}
 	}
 
-	// 验证分组权限（如果指定了分组）
-	if req.GroupID != nil {
-		group, err := s.groupRepo.GetByID(ctx, *req.GroupID)
-		if err != nil {
-			return nil, fmt.Errorf("get group: %w", err)
-		}
-
-		// 检查用户是否可以绑定该分组
-		if !s.canUserBindGroup(ctx, user, group) {
-			return nil, ErrGroupNotAllowed
-		}
+	groupIDs := resolveCreateGroupIDs(req)
+	groups, err := s.validateAndLoadGroupIDs(ctx, user, groupIDs, true)
+	if err != nil {
+		return nil, err
 	}
+	_ = groups
 
 	var key string
 
@@ -414,7 +473,6 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 		UserID:      userID,
 		Key:         key,
 		Name:        html.EscapeString(req.Name),
-		GroupID:     req.GroupID,
 		Status:      StatusActive,
 		IPWhitelist: req.IPWhitelist,
 		IPBlacklist: req.IPBlacklist,
@@ -423,6 +481,11 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 		RateLimit5h: req.RateLimit5h,
 		RateLimit1d: req.RateLimit1d,
 		RateLimit7d: req.RateLimit7d,
+	}
+	apiKey.ApplyGroupIDs(groupIDs)
+	if len(groups) > 0 {
+		apiKey.Group = groups[0]
+		apiKey.Groups = groups
 	}
 
 	// Set expiration time if specified
@@ -662,23 +725,23 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 		apiKey.Name = html.EscapeString(*req.Name)
 	}
 
-	if req.GroupID != nil {
-		// 验证分组权限
+	if ids, changed := resolveUpdateGroupIDs(req); changed {
 		user, err := s.userRepo.GetByID(ctx, userID)
 		if err != nil {
 			return nil, fmt.Errorf("get user: %w", err)
 		}
-
-		group, err := s.groupRepo.GetByID(ctx, *req.GroupID)
+		groups, err := s.validateAndLoadGroupIDs(ctx, user, ids, true)
 		if err != nil {
-			return nil, fmt.Errorf("get group: %w", err)
+			return nil, err
 		}
-
-		if !s.canUserBindGroup(ctx, user, group) {
-			return nil, ErrGroupNotAllowed
+		apiKey.ApplyGroupIDs(ids)
+		if len(groups) > 0 {
+			apiKey.Group = groups[0]
+			apiKey.Groups = groups
+		} else {
+			apiKey.Group = nil
+			apiKey.Groups = nil
 		}
-
-		apiKey.GroupID = req.GroupID
 	}
 
 	if req.Status != nil {

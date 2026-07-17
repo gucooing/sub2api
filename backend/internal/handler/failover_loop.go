@@ -63,6 +63,18 @@ func NewFailoverState(maxSwitches int, hasBoundSession bool) *FailoverState {
 	}
 }
 
+// ResetForNextGroup clears per-group account failover state when advancing the group chain.
+// Keeps ForceCacheBilling / LastFailoverErr for diagnostics.
+func (s *FailoverState) ResetForNextGroup() {
+	if s == nil {
+		return
+	}
+	s.SwitchCount = 0
+	s.FailedAccountIDs = make(map[int64]struct{})
+	s.SameAccountRetryCount = make(map[int64]int)
+	s.LastFailoverErr = nil
+}
+
 // HandleFailoverError 处理 UpstreamFailoverError，返回下一步动作。
 // 包含：缓存计费判断、同账号重试、临时封禁、切换计数、Antigravity 延时。
 func (s *FailoverState) HandleFailoverError(

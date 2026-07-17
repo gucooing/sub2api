@@ -335,20 +335,54 @@ func abortIfAPIKeyGroupNotAllowed(c *gin.Context, apiKey *service.APIKey) bool {
 }
 
 func validateAPIKeyGroupAllowed(apiKey *service.APIKey) bool {
-	if apiKey == nil || apiKey.GroupID == nil || apiKey.User == nil || apiKey.Group == nil {
+	if apiKey == nil || apiKey.User == nil {
 		return true
 	}
-	group := apiKey.Group
-	if group.IsSubscriptionType() {
-		return true
+	// Multi-group: allow if any group in the chain is bindable (subscription types skip exclusive check).
+	groups := usableAuthGroups(apiKey)
+	if len(groups) == 0 {
+		// No group binding — allowed (legacy unbound keys).
+		if len(apiKey.EffectiveGroupIDs()) == 0 {
+			return true
+		}
+		// All listed groups missing from hydrate: fall back to primary.
+		if apiKey.GroupID == nil || apiKey.Group == nil {
+			return true
+		}
+		group := apiKey.Group
+		if group.IsSubscriptionType() {
+			return true
+		}
+		return apiKey.User.CanBindGroup(group.ID, group.IsExclusive)
 	}
-	return apiKey.User.CanBindGroup(group.ID, group.IsExclusive)
+	for _, group := range groups {
+		if group.IsSubscriptionType() {
+			return true
+		}
+		if apiKey.User.CanBindGroup(group.ID, group.IsExclusive) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateAPIKeyGroupAvailable(apiKey *service.APIKey) (string, string, bool) {
-	if apiKey == nil || apiKey.GroupID == nil {
+	if apiKey == nil {
 		return "", "", true
 	}
+	ids := apiKey.EffectiveGroupIDs()
+	if len(ids) == 0 {
+		return "", "", true
+	}
+	groups := usableAuthGroups(apiKey)
+	if len(groups) > 0 {
+		// Promote first available group as primary for this request.
+		apiKey.Group = groups[0]
+		gid := groups[0].ID
+		apiKey.GroupID = &gid
+		return "", "", true
+	}
+	// No usable group in hydrate — inspect primary for error messaging.
 	group := apiKey.Group
 	if group == nil || strings.EqualFold(group.Status, "deleted") {
 		return "GROUP_DELETED", "API Key 所属分组已删除", false
@@ -357,4 +391,44 @@ func validateAPIKeyGroupAvailable(apiKey *service.APIKey) (string, string, bool)
 		return "GROUP_DISABLED", "API Key 所属分组已停用", false
 	}
 	return "", "", true
+}
+
+// usableAuthGroups returns active (non-deleted) groups from the key's ordered chain.
+func usableAuthGroups(apiKey *service.APIKey) []*service.Group {
+	if apiKey == nil {
+		return nil
+	}
+	out := make([]*service.Group, 0, len(apiKey.Groups)+1)
+	seen := make(map[int64]struct{})
+	add := func(g *service.Group) {
+		if g == nil || g.ID <= 0 {
+			return
+		}
+		if _, ok := seen[g.ID]; ok {
+			return
+		}
+		if strings.EqualFold(g.Status, "deleted") || !g.IsActive() {
+			return
+		}
+		seen[g.ID] = struct{}{}
+		out = append(out, g)
+	}
+	// Prefer ordered Groups; include primary.
+	if len(apiKey.Groups) > 0 {
+		// Keep order of EffectiveGroupIDs when possible.
+		byID := make(map[int64]*service.Group, len(apiKey.Groups))
+		for _, g := range apiKey.Groups {
+			if g != nil {
+				byID[g.ID] = g
+			}
+		}
+		for _, id := range apiKey.EffectiveGroupIDs() {
+			add(byID[id])
+		}
+		for _, g := range apiKey.Groups {
+			add(g)
+		}
+	}
+	add(apiKey.Group)
+	return out
 }

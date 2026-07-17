@@ -14,15 +14,27 @@ export interface UpdateApiKeyGroupResult {
 }
 
 /**
- * Update an API key's group binding
+ * Update an API key's group binding (admin).
+ * Supports single group_id (legacy) and ordered group_ids when the admin API accepts it.
  * @param id - API Key ID
- * @param groupId - Group ID (0 to unbind, positive to bind, null/undefined to skip)
+ * @param groupIdOrIds - Group ID (0/null to unbind), or ordered group_ids array
  * @returns Updated API key with auto-grant info
  */
-export async function updateApiKeyGroup(id: number, groupId: number | null): Promise<UpdateApiKeyGroupResult> {
-  const { data } = await apiClient.put<UpdateApiKeyGroupResult>(`/admin/api-keys/${id}`, {
-    group_id: groupId === null ? 0 : groupId
-  })
+export async function updateApiKeyGroup(
+  id: number,
+  groupIdOrIds: number | number[] | null
+): Promise<UpdateApiKeyGroupResult> {
+  const body: { group_id?: number; group_ids?: number[] } = {}
+
+  if (Array.isArray(groupIdOrIds)) {
+    body.group_ids = groupIdOrIds
+    // Dual-write primary when non-empty; empty array unbinds via group_id: 0
+    body.group_id = groupIdOrIds.length > 0 ? groupIdOrIds[0] : 0
+  } else {
+    body.group_id = groupIdOrIds === null ? 0 : groupIdOrIds
+  }
+
+  const { data } = await apiClient.put<UpdateApiKeyGroupResult>(`/admin/api-keys/${id}`, body)
   return data
 }
 
