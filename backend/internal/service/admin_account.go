@@ -818,7 +818,39 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if err != nil {
 		return nil, err
 	}
+	// Account membership / status / schedulability changes should refresh key auth
+	// snapshots so multi-group keys re-evaluate group availability on next request.
+	s.invalidateAuthCacheForAccountGroups(ctx, updated)
 	return updated, nil
+}
+
+// invalidateAuthCacheForAccountGroups invalidates auth cache for every group this account belongs to.
+func (s *adminServiceImpl) invalidateAuthCacheForAccountGroups(ctx context.Context, account *Account) {
+	if s == nil || s.authCacheInvalidator == nil || account == nil {
+		return
+	}
+	seen := make(map[int64]struct{})
+	for _, id := range account.GroupIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(ctx, id)
+	}
+	for _, ag := range account.AccountGroups {
+		id := ag.GroupID
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		s.authCacheInvalidator.InvalidateAuthCacheByGroupID(ctx, id)
+	}
 }
 
 // UpdateAccountExtra 仅对 Extra JSONB 做 key 级合并，避免覆盖其它运行态键
@@ -1155,7 +1187,12 @@ func (s *adminServiceImpl) ClearAccountError(ctx context.Context, id int64) (*Ac
 	if s.runtimeBlocker != nil {
 		s.runtimeBlocker.ClearAccountSchedulingBlock(id)
 	}
-	return s.accountRepo.GetByID(ctx, id)
+	updated, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s.invalidateAuthCacheForAccountGroups(ctx, updated)
+	return updated, nil
 }
 
 func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorMsg string) error {
@@ -1170,6 +1207,7 @@ func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, 
 	if err != nil {
 		return nil, err
 	}
+	s.invalidateAuthCacheForAccountGroups(ctx, updated)
 	return updated, nil
 }
 

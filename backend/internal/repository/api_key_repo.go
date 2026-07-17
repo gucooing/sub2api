@@ -775,14 +775,46 @@ func (r *apiKeyRepository) ListKeysByUserID(ctx context.Context, userID int64) (
 }
 
 func (r *apiKeyRepository) ListKeysByGroupID(ctx context.Context, groupID int64) ([]string, error) {
-	keys, err := r.activeQuery().
-		Where(apikey.GroupIDEQ(groupID)).
-		Select(apikey.FieldKey).
-		Strings(ctx)
+	// Include keys where group is primary (group_id) OR present in ordered group_ids fallback chain.
+	// Auth-cache invalidation on group/account changes must refresh multi-group keys too.
+	if r.sql == nil {
+		keys, err := r.activeQuery().
+			Where(apikey.GroupIDEQ(groupID)).
+			Select(apikey.FieldKey).
+			Strings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return keys, nil
+	}
+	const q = `
+		SELECT key
+		FROM api_keys
+		WHERE deleted_at IS NULL
+		  AND (
+		    group_id = $1
+		    OR (
+		      group_ids IS NOT NULL
+		      AND group_ids @> to_jsonb(ARRAY[$1::bigint])
+		    )
+		  )
+	`
+	rows, err := r.sql.QueryContext(ctx, q, groupID)
 	if err != nil {
 		return nil, err
 	}
-	return keys, nil
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		if key != "" {
+			out = append(out, key)
+		}
+	}
+	return out, rows.Err()
 }
 
 // IncrementQuotaUsed 使用 Ent 原子递增 quota_used 字段并返回新值

@@ -357,7 +357,8 @@ func resolveCreateGroupIDs(req CreateAPIKeyRequest) []int64 {
 }
 
 // resolveUpdateGroupIDs returns (ids, changed). Prefers explicit group_ids.
-func resolveUpdateGroupIDs(req UpdateAPIKeyRequest) (ids []int64, changed bool) {
+// Legacy group_id-only updates promote the primary without collapsing an existing multi-group chain.
+func resolveUpdateGroupIDs(req UpdateAPIKeyRequest, current *APIKey) (ids []int64, changed bool) {
 	if req.SetGroupIDs {
 		return NormalizeGroupIDs(req.GroupIDs), true
 	}
@@ -365,9 +366,29 @@ func resolveUpdateGroupIDs(req UpdateAPIKeyRequest) (ids []int64, changed bool) 
 		if *req.GroupID <= 0 {
 			return []int64{}, true
 		}
-		return []int64{*req.GroupID}, true
+		existing := []int64{}
+		if current != nil {
+			existing = NormalizeGroupIDs(current.EffectiveGroupIDs())
+		}
+		return promoteGroupIDFront(existing, *req.GroupID), true
 	}
 	return nil, false
+}
+
+// promoteGroupIDFront moves id to the front of the ordered chain (or prepends it).
+func promoteGroupIDFront(existing []int64, id int64) []int64 {
+	if id <= 0 {
+		return NormalizeGroupIDs(existing)
+	}
+	out := make([]int64, 0, len(existing)+1)
+	out = append(out, id)
+	for _, x := range existing {
+		if x == id {
+			continue
+		}
+		out = append(out, x)
+	}
+	return NormalizeGroupIDs(out)
 }
 
 // validateAndLoadGroupIDs loads groups, checks bind permission and same platform.
@@ -725,7 +746,7 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 		apiKey.Name = html.EscapeString(*req.Name)
 	}
 
-	if ids, changed := resolveUpdateGroupIDs(req); changed {
+	if ids, changed := resolveUpdateGroupIDs(req, apiKey); changed {
 		user, err := s.userRepo.GetByID(ctx, userID)
 		if err != nil {
 			return nil, fmt.Errorf("get user: %w", err)

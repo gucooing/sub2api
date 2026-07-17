@@ -51,8 +51,16 @@ type APIKey struct {
 	User                *User
 	Group               *Group
 	// Groups is an optional ordered hydrate of GroupIDs (auth cache / multi-group failover).
-	Groups              []*Group
-	CurrentConcurrency  int
+	Groups []*Group
+	// GroupUnavailableUntil is key-scoped temporary skip map: groupID -> until unix.
+	// Only written when this key observed zero available accounts in that group.
+	// Lives in auth cache only (not DB); other keys are unaffected.
+	GroupUnavailableUntil map[int64]int64 `json:"-"`
+	// PinnedGroupID is set when a sticky session is bound to an account in this group.
+	// While set (and group still usable), auth keeps this group even if a higher-priority
+	// group recovers. Cleared when sticky detaches / selection cannot honor the pin.
+	PinnedGroupID *int64 `json:"-"`
+	CurrentConcurrency int
 
 	// Quota fields
 	Quota     float64    // Quota limit in USD (0 = unlimited)

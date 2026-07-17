@@ -168,6 +168,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
+				// True zero-available: key-scoped mark; next request skips this group.
+				markKeyGroupNoAvailableAccounts(c, h.apiKeyService, apiKey, "no_available_accounts", reqLog)
 				cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel)
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)

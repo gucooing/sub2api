@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestNormalizeGroupIDs(t *testing.T) {
 	got := NormalizeGroupIDs([]int64{3, 0, 3, -1, 2, 2, 1})
@@ -55,17 +58,57 @@ func TestResolveCreateGroupIDs(t *testing.T) {
 }
 
 func TestResolveUpdateGroupIDs(t *testing.T) {
-	ids, changed := resolveUpdateGroupIDs(UpdateAPIKeyRequest{GroupID: apiKeyGroupID(3)})
+	// group_id-only with no existing chain -> single id
+	ids, changed := resolveUpdateGroupIDs(UpdateAPIKeyRequest{GroupID: apiKeyGroupID(3)}, nil)
 	if !changed || len(ids) != 1 || ids[0] != 3 {
-		t.Fatalf("legacy update: %v %v", ids, changed)
+		t.Fatalf("legacy update empty current: %v %v", ids, changed)
 	}
-	ids, changed = resolveUpdateGroupIDs(UpdateAPIKeyRequest{SetGroupIDs: true, GroupIDs: []int64{1, 1, 2}})
+	// group_id-only must promote primary without collapsing multi-group chain
+	current := &APIKey{GroupIDs: []int64{10, 20, 30}, GroupID: apiKeyGroupID(10)}
+	ids, changed = resolveUpdateGroupIDs(UpdateAPIKeyRequest{GroupID: apiKeyGroupID(20)}, current)
+	if !changed || len(ids) != 3 || ids[0] != 20 || ids[1] != 10 || ids[2] != 30 {
+		t.Fatalf("promote primary: %v %v", ids, changed)
+	}
+	ids, changed = resolveUpdateGroupIDs(UpdateAPIKeyRequest{SetGroupIDs: true, GroupIDs: []int64{1, 1, 2}}, current)
 	if !changed || len(ids) != 2 || ids[0] != 1 || ids[1] != 2 {
 		t.Fatalf("set group_ids: %v %v", ids, changed)
 	}
-	ids, changed = resolveUpdateGroupIDs(UpdateAPIKeyRequest{})
+	ids, changed = resolveUpdateGroupIDs(UpdateAPIKeyRequest{}, current)
 	if changed {
 		t.Fatalf("no change expected: %v", ids)
+	}
+}
+
+func TestSelectPrimaryGroupForKeySkipsUnavailable(t *testing.T) {
+	g1 := &Group{ID: 1, Status: StatusActive}
+	g2 := &Group{ID: 2, Status: StatusActive}
+	k := &APIKey{
+		GroupIDs:              []int64{1, 2},
+		GroupID:               apiKeyGroupID(1),
+		Group:                 g1,
+		Groups:                []*Group{g1, g2},
+		GroupUnavailableUntil: map[int64]int64{1: time.Now().Add(time.Minute).Unix()},
+	}
+	SelectPrimaryGroupForKey(k)
+	if k.GroupID == nil || *k.GroupID != 2 {
+		t.Fatalf("expected skip unavailable g1, got %v", k.GroupID)
+	}
+}
+
+func TestSelectPrimaryGroupForKeyHonorsPin(t *testing.T) {
+	g1 := &Group{ID: 1, Status: StatusActive}
+	g2 := &Group{ID: 2, Status: StatusActive}
+	pin := int64(2)
+	k := &APIKey{
+		GroupIDs:      []int64{1, 2},
+		GroupID:       apiKeyGroupID(1),
+		Group:         g1,
+		Groups:        []*Group{g1, g2},
+		PinnedGroupID: &pin,
+	}
+	SelectPrimaryGroupForKey(k)
+	if k.GroupID == nil || *k.GroupID != 2 {
+		t.Fatalf("expected sticky pin g2, got %v", k.GroupID)
 	}
 }
 

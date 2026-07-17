@@ -396,7 +396,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "compact_not_supported", "No available OpenAI accounts support /responses/compact", streamStarted)
 					return
 				}
-				cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel)
+								// True zero-available for this group: mark key-scoped skip, return error.
+				// Next request selects the next group via auth cache (no same-request hop).
+				// Do NOT mark on account failover exhaustion (failedAccountIDs non-empty).
+				markKeyGroupNoAvailableAccounts(c, h.apiKeyService, apiKey, "no_available_accounts", reqLog)
+cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel)
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
@@ -430,7 +434,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Int64("latency_ms", scheduleDecision.LatencyMs),
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
-		account := selection.Account
+					// Sticky session/previous hit: pin current group on this key so multi-group
+			// selection does not hop while the sticky binding remains.
+			if (scheduleDecision.StickySessionHit || scheduleDecision.StickyPreviousHit) &&
+				apiKey.GroupID != nil && *apiKey.GroupID > 0 {
+				pinKeyGroupForSticky(c, h.apiKeyService, apiKey, *apiKey.GroupID)
+			}
+account := selection.Account
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
@@ -936,7 +946,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			)
 			if len(failedAccountIDs) == 0 {
 				if err != nil {
-					cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
+									// True zero-available: key-scoped mark; next request skips this group.
+				markKeyGroupNoAvailableAccounts(c, h.apiKeyService, apiKey, "no_available_accounts", reqLog)
+cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 					}

@@ -19,6 +19,12 @@ type APIKeyAuthSnapshot struct {
 	// Groups is the ordered hydrate of GroupIDs (v16+). Group remains primary for compat.
 	Groups []APIKeyAuthGroupSnapshot `json:"groups,omitempty"`
 
+	// UnavailableGroups is key-scoped: group_id -> until_unix when this key saw zero available accounts.
+	// Other keys / global group state are not affected. Expired entries are ignored on read.
+	UnavailableGroups map[int64]int64 `json:"unavailable_groups,omitempty"`
+	// PinnedGroupID keeps sticky sessions on the same group until detach (v17+).
+	PinnedGroupID *int64 `json:"pinned_group_id,omitempty"`
+
 	// Quota fields for API Key independent quota feature
 	Quota     float64 `json:"quota"`      // Quota limit in USD (0 = unlimited)
 	QuotaUsed float64 `json:"quota_used"` // Used quota amount

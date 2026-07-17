@@ -374,12 +374,13 @@ func validateAPIKeyGroupAvailable(apiKey *service.APIKey) (string, string, bool)
 	if len(ids) == 0 {
 		return "", "", true
 	}
+	// Key-scoped selection: skip groups this key marked unavailable (zero accounts).
+	// Honors sticky pin when still usable. Does not touch global group state.
+	service.SelectPrimaryGroupForKey(apiKey)
+
 	groups := usableAuthGroups(apiKey)
 	if len(groups) > 0 {
-		// Promote first available group as primary for this request.
-		apiKey.Group = groups[0]
-		gid := groups[0].ID
-		apiKey.GroupID = &gid
+		// usableAuthGroups already filters status; SelectPrimaryGroupForKey set GroupID.
 		return "", "", true
 	}
 	// No usable group in hydrate — inspect primary for error messaging.
@@ -393,7 +394,8 @@ func validateAPIKeyGroupAvailable(apiKey *service.APIKey) (string, string, bool)
 	return "", "", true
 }
 
-// usableAuthGroups returns active (non-deleted) groups from the key's ordered chain.
+// usableAuthGroups returns active (non-deleted) groups from the key's ordered chain
+// that are not key-scoped temporarily unavailable.
 func usableAuthGroups(apiKey *service.APIKey) []*service.Group {
 	if apiKey == nil {
 		return nil
@@ -408,6 +410,9 @@ func usableAuthGroups(apiKey *service.APIKey) []*service.Group {
 			return
 		}
 		if strings.EqualFold(g.Status, "deleted") || !g.IsActive() {
+			return
+		}
+		if apiKey.IsGroupUnavailableForKey(g.ID) {
 			return
 		}
 		seen[g.ID] = struct{}{}

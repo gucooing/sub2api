@@ -118,12 +118,12 @@ export async function create(
  * @returns Updated API key
  */
 export async function update(id: number, updates: UpdateApiKeyRequest): Promise<ApiKey> {
-  // Keep group_id in sync when only group_ids is provided (compat dual-write)
+  // Keep group_id in sync when only group_ids is provided (compat dual-write).
+  // Do NOT invent group_ids:[group_id] when only group_id is set — backend promotes
+  // primary without collapsing an existing multi-group chain.
   const payload: UpdateApiKeyRequest = { ...updates }
   if (payload.group_ids !== undefined && payload.group_ids.length > 0 && payload.group_id === undefined) {
     payload.group_id = payload.group_ids[0]
-  } else if (payload.group_id !== undefined && payload.group_ids === undefined && payload.group_id != null) {
-    payload.group_ids = [payload.group_id]
   }
 
   const { data } = await apiClient.put<ApiKey>(`/keys/${id}`, payload)

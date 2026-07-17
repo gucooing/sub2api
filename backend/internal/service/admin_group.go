@@ -855,9 +855,32 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 		}
 
 		gid := *groupID
-		apiKey.ApplyGroupIDs([]int64{gid})
+		// Promote primary without collapsing an existing multi-group fallback chain.
+		nextIDs := promoteGroupIDFront(NormalizeGroupIDs(apiKey.EffectiveGroupIDs()), gid)
+		apiKey.ApplyGroupIDs(nextIDs)
 		apiKey.Group = group
-		apiKey.Groups = []*Group{group}
+		if len(apiKey.Groups) > 0 {
+			byID := make(map[int64]*Group, len(apiKey.Groups)+1)
+			for _, g := range apiKey.Groups {
+				if g != nil {
+					byID[g.ID] = g
+				}
+			}
+			byID[group.ID] = group
+			hydrated := make([]*Group, 0, len(nextIDs))
+			for _, id := range nextIDs {
+				if g := byID[id]; g != nil {
+					hydrated = append(hydrated, g)
+				}
+			}
+			if len(hydrated) > 0 {
+				apiKey.Groups = hydrated
+			} else {
+				apiKey.Groups = []*Group{group}
+			}
+		} else {
+			apiKey.Groups = []*Group{group}
+		}
 
 		// 专属标准分组：使用事务保证「添加分组权限」与「更新 API Key」的原子性
 		if group.IsExclusive && !group.IsSubscriptionType() {

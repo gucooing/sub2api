@@ -27,10 +27,12 @@ export async function updateApiKeyGroup(
   const body: { group_id?: number; group_ids?: number[] } = {}
 
   if (Array.isArray(groupIdOrIds)) {
+    // Full ordered chain replace (or empty unbind). Prefer group_ids so backend
+    // does not treat this as a legacy group_id-only promote.
     body.group_ids = groupIdOrIds
-    // Dual-write primary when non-empty; empty array unbinds via group_id: 0
     body.group_id = groupIdOrIds.length > 0 ? groupIdOrIds[0] : 0
   } else {
+    // Legacy single group_id: backend promotes primary without collapsing chain.
     body.group_id = groupIdOrIds === null ? 0 : groupIdOrIds
   }
 

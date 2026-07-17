@@ -559,26 +559,16 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	currentAPIKey := apiKey
 	currentSubscription := subscription
 	var fallbackGroupID *int64
+	// Multi-group selection is key-scoped and done at auth time (SelectPrimaryGroupForKey):
+	// skip groups this key marked unavailable; honor sticky pin. No same-request group hop.
 	if apiKey.Group != nil {
 		fallbackGroupID = apiKey.Group.FallbackGroupIDOnInvalidRequest
 	}
-	fallbackUsed := false
-	groupCursor := NewGroupFallbackCursor(
-		c.Request.Context(),
-		apiKey,
-		func(ctx context.Context, groupID int64) (*service.Group, error) {
-			return h.gatewayService.ResolveGroupByID(ctx, groupID)
-		},
-		nil,
-	)
-	if groupCursor != nil {
-		if cur := groupCursor.CurrentAPIKey(c.Request.Context()); cur != nil {
-			currentAPIKey = cur
-			if currentAPIKey.Group != nil {
-				fallbackGroupID = currentAPIKey.Group.FallbackGroupIDOnInvalidRequest
-			}
-		}
+	// Sticky session pin: keep this group until sticky detaches.
+	if hasBoundSession && apiKey.GroupID != nil && *apiKey.GroupID > 0 {
+		pinKeyGroupForSticky(c, h.apiKeyService, apiKey, *apiKey.GroupID)
 	}
+	fallbackUsed := false
 
 	// 单账号分组提前设置 SingleAccountRetry 标记，让 Service 层首次 503 就不设模型限流标记。
 	// 避免单账号分组收到 503 (MODEL_CAPACITY_EXHAUSTED) 时设 29s 限流，导致后续请求连续快速失败。
@@ -608,26 +598,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
 			if err != nil {
 				if len(fs.FailedAccountIDs) == 0 {
-					if groupCursor != nil {
-						if ok, reason := groupCursor.Advance(c.Request.Context()); ok {
-							nextKey := groupCursor.CurrentAPIKey(c.Request.Context())
-							if nextKey != nil {
-								reqLog.Warn("gateway.group_fallback_advance",
-									zap.String("reason", reason),
-									zap.Int64p("from_group_id", currentAPIKey.GroupID),
-									zap.Int64p("to_group_id", nextKey.GroupID),
-									zap.String("trigger", "no_available_accounts"),
-								)
-								currentAPIKey = nextKey
-								currentSubscription = nil
-								if currentAPIKey.Group != nil {
-									fallbackGroupID = currentAPIKey.Group.FallbackGroupIDOnInvalidRequest
-								}
-								fs.ResetForNextGroup()
-								continue
-							}
-						}
-					}
+					// True zero-available: mark THIS key's current group unavailable and fail
+					// this request. Next request skips via auth SelectPrimaryGroupForKey.
+					// Account failover exhaustion must NOT mark the whole group.
+					markKeyGroupNoAvailableAccounts(c, h.apiKeyService, currentAPIKey, "no_available_accounts", reqLog)
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform)
 					if !cls.ModelNotFound {
 						markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -915,26 +889,8 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					case FailoverContinue:
 						continue
 					case FailoverExhausted:
-						if groupCursor != nil {
-							if ok, reason := groupCursor.Advance(c.Request.Context()); ok {
-								nextKey := groupCursor.CurrentAPIKey(c.Request.Context())
-								if nextKey != nil {
-									reqLog.Warn("gateway.group_fallback_advance",
-										zap.String("reason", reason),
-										zap.Int64p("from_group_id", currentAPIKey.GroupID),
-										zap.Int64p("to_group_id", nextKey.GroupID),
-										zap.String("trigger", "account_failover_exhausted"),
-									)
-									currentAPIKey = nextKey
-									currentSubscription = nil
-									if currentAPIKey.Group != nil {
-										fallbackGroupID = currentAPIKey.Group.FallbackGroupIDOnInvalidRequest
-									}
-									fs.ResetForNextGroup()
-									continue
-								}
-							}
-						}
+						// Per-account failover exhaustion must NOT mark group unavailable
+						// and must NOT hop multi-group in-request.
 						h.handleFailoverExhausted(c, fs.LastFailoverErr, account.Platform, streamStarted)
 						return
 					case FailoverCanceled:

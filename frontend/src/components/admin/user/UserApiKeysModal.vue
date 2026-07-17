@@ -18,13 +18,15 @@
             </div>
           </div>
           <div class="mt-3 flex flex-wrap gap-4 text-xs text-gray-500">
-            <div class="flex items-center gap-1">
+            <div class="group/dropdown flex items-center gap-1">
               <span>{{ t('admin.users.group') }}:</span>
               <button
                 :ref="(el) => setGroupButtonRef(key.id, el)"
+                type="button"
                 @click="openGroupSelector(key)"
                 class="-mx-1 -my-0.5 flex cursor-pointer items-center gap-1 rounded-md px-1 py-0.5 transition-colors hover:bg-gray-100 dark:hover:bg-dark-700"
                 :disabled="updatingKeyIds.has(key.id)"
+                :title="t('keys.clickToEditGroups')"
               >
                 <GroupBadge
                   v-if="displayGroup(key)"
@@ -55,62 +57,32 @@
     </div>
   </BaseDialog>
 
-  <!-- Group Selector Dropdown -->
+  <!-- Inline multi-group editor -->
   <Teleport to="body">
     <div
-      v-if="groupSelectorKeyId !== null && dropdownPosition"
+      v-if="groupSelectorKeyId !== null && dropdownPosition && selectedKeyForGroup"
       ref="dropdownRef"
-      class="animate-in fade-in slide-in-from-top-2 fixed z-[100000020] w-64 overflow-hidden rounded-xl bg-white shadow-lg ring-1 ring-black/5 duration-200 dark:bg-dark-800 dark:ring-white/10"
+      class="animate-in fade-in slide-in-from-top-2 fixed z-[100000020] w-[min(28rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl bg-white shadow-lg ring-1 ring-black/5 duration-200 dark:bg-dark-800 dark:ring-white/10"
       :style="{ top: dropdownPosition.top + 'px', left: dropdownPosition.left + 'px' }"
+      @click.stop
     >
-      <div class="max-h-64 overflow-y-auto p-1.5">
-        <!-- Unbind option -->
-        <button
-          @click="changeGroup(selectedKeyForGroup!, null)"
-          :class="[
-            'flex w-full items-center rounded-lg px-3 py-2 text-sm transition-colors',
-            !(selectedKeyForGroup && resolveGroupIds(selectedKeyForGroup)[0])
-              ? 'bg-primary-50 dark:bg-primary-900/20'
-              : 'hover:bg-gray-100 dark:hover:bg-dark-700'
-          ]"
-        >
-          <span class="text-gray-500 italic">{{ t('admin.users.none') }}</span>
-          <svg
-            v-if="!(selectedKeyForGroup && resolveGroupIds(selectedKeyForGroup)[0])"
-            class="ml-auto h-4 w-4 shrink-0 text-primary-600 dark:text-primary-400"
-            fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"
-          ><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+      <div class="border-b border-gray-100 px-3 py-2 dark:border-dark-700">
+        <p class="text-sm font-medium text-gray-900 dark:text-white">{{ t('keys.editGroupsTitle') }}</p>
+        <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('keys.editGroupsHint') }}</p>
+      </div>
+      <div class="max-h-[24rem] overflow-y-auto p-3">
+        <OrderedGroupPicker
+          v-model="inlineGroupIds"
+          :groups="allGroups as any"
+          :max-count="5"
+        />
+      </div>
+      <div class="flex items-center justify-end gap-2 border-t border-gray-100 px-3 py-2 dark:border-dark-700">
+        <button type="button" class="btn btn-secondary btn-sm" :disabled="inlineGroupSaving" @click="closeGroupSelector">
+          {{ t('common.cancel') }}
         </button>
-        <!-- Group options -->
-        <button
-          v-for="group in allGroups"
-          :key="group.id"
-          @click="changeGroup(selectedKeyForGroup!, group.id)"
-          :class="[
-            'flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors',
-            (selectedKeyForGroup
-              ? (resolveGroupIds(selectedKeyForGroup)[0] ?? null)
-              : null) === group.id
-              ? 'bg-primary-50 dark:bg-primary-900/20'
-              : 'hover:bg-gray-100 dark:hover:bg-dark-700'
-          ]"
-        >
-          <GroupOptionItem
-            :name="group.name"
-            :platform="group.platform"
-            :subscription-type="group.subscription_type"
-            :rate-multiplier="group.rate_multiplier"
-            :peak-rate-enabled="group.peak_rate_enabled"
-            :peak-start="group.peak_start"
-            :peak-end="group.peak_end"
-            :peak-rate-multiplier="group.peak_rate_multiplier"
-            :description="group.description"
-            :selected="
-              (selectedKeyForGroup
-                ? (resolveGroupIds(selectedKeyForGroup)[0] ?? null)
-                : null) === group.id
-            "
-          />
+        <button type="button" class="btn btn-primary btn-sm" :disabled="inlineGroupSaving || !inlineGroupIds.length" @click="saveInlineGroups">
+          {{ inlineGroupSaving ? t('common.saving') : t('common.save') }}
         </button>
       </div>
     </div>
@@ -126,7 +98,7 @@ import { formatDateTime } from '@/utils/format'
 import type { AdminUser, AdminGroup, ApiKey } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
-import GroupOptionItem from '@/components/common/GroupOptionItem.vue'
+import OrderedGroupPicker from '@/components/keys/OrderedGroupPicker.vue'
 
 const props = defineProps<{ show: boolean; user: AdminUser | null }>()
 const emit = defineEmits(['close'])
@@ -138,6 +110,8 @@ const allGroups = ref<AdminGroup[]>([])
 const loading = ref(false)
 const updatingKeyIds = ref(new Set<number>())
 const groupSelectorKeyId = ref<number | null>(null)
+const inlineGroupIds = ref<number[]>([])
+const inlineGroupSaving = ref(false)
 const dropdownPosition = ref<{ top: number; left: number } | null>(null)
 const dropdownRef = ref<HTMLElement | null>(null)
 const scrollContainerRef = ref<HTMLElement | null>(null)
@@ -205,45 +179,46 @@ const loadGroups = async () => {
   }
 }
 
-const DROPDOWN_HEIGHT = 272 // max-h-64 = 16rem = 256px + padding
+const DROPDOWN_HEIGHT = 480
 const DROPDOWN_GAP = 4
 
 const openGroupSelector = (key: ApiKey) => {
   if (groupSelectorKeyId.value === key.id) {
     closeGroupSelector()
-  } else {
-    const buttonEl = groupButtonRefs.value.get(key.id)
-    if (buttonEl) {
-      const rect = buttonEl.getBoundingClientRect()
-      const spaceBelow = window.innerHeight - rect.bottom
-      const openUpward = spaceBelow < DROPDOWN_HEIGHT && rect.top > spaceBelow
-      dropdownPosition.value = {
-        top: openUpward ? rect.top - DROPDOWN_HEIGHT - DROPDOWN_GAP : rect.bottom + DROPDOWN_GAP,
-        left: rect.left
-      }
-    }
-    groupSelectorKeyId.value = key.id
+    return
   }
+  const buttonEl = groupButtonRefs.value.get(key.id)
+  if (buttonEl) {
+    const rect = buttonEl.getBoundingClientRect()
+    const spaceBelow = window.innerHeight - rect.bottom
+    const openUpward = spaceBelow < DROPDOWN_HEIGHT && rect.top > spaceBelow
+    dropdownPosition.value = {
+      top: openUpward ? rect.top - DROPDOWN_HEIGHT - DROPDOWN_GAP : rect.bottom + DROPDOWN_GAP,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 28 * 16))
+    }
+  }
+  groupSelectorKeyId.value = key.id
+  inlineGroupIds.value = [...resolveGroupIds(key)]
 }
 
 const closeGroupSelector = () => {
   groupSelectorKeyId.value = null
   dropdownPosition.value = null
+  inlineGroupIds.value = []
+  inlineGroupSaving.value = false
 }
 
-const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
-  closeGroupSelector()
-  const currentPrimary = resolveGroupIds(key)[0] ?? null
-  if (currentPrimary === newGroupId) return
-
+const saveInlineGroups = async () => {
+  const key = selectedKeyForGroup.value
+  if (!key) return
+  if (!inlineGroupIds.value.length) {
+    appStore.showError(t('keys.groupRequired'))
+    return
+  }
+  inlineGroupSaving.value = true
   updatingKeyIds.value.add(key.id)
   try {
-    // Admin inline picker still sets a single primary group; client dual-writes group_ids when supported.
-    const result = await adminAPI.apiKeys.updateApiKeyGroup(
-      key.id,
-      newGroupId == null ? null : [newGroupId]
-    )
-    // Update local data
+    const result = await adminAPI.apiKeys.updateApiKeyGroup(key.id, inlineGroupIds.value)
     const idx = apiKeys.value.findIndex((k) => k.id === key.id)
     if (idx !== -1) {
       apiKeys.value[idx] = result.api_key
@@ -253,9 +228,11 @@ const changeGroup = async (key: ApiKey, newGroupId: number | null) => {
     } else {
       appStore.showSuccess(t('admin.users.groupChangedSuccess'))
     }
+    closeGroupSelector()
   } catch (error: any) {
     appStore.showError(error?.message || t('admin.users.groupChangeFailed'))
   } finally {
+    inlineGroupSaving.value = false
     updatingKeyIds.value.delete(key.id)
   }
 }
