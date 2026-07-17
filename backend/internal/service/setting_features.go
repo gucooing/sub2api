@@ -150,6 +150,20 @@ func (s *SettingService) GetAffiliateRebatePerInviteeCap(ctx context.Context) fl
 	return cap
 }
 
+// GetAffiliateInviteBonus 返回邀请得赠金金额。
+// 返回 0 表示关闭；成功绑定邀请关系后按该金额直接计入可转返利额度。
+func (s *SettingService) GetAffiliateInviteBonus(ctx context.Context) float64 {
+	raw, err := s.settingRepo.GetValue(ctx, SettingKeyAffiliateInviteBonus)
+	if err != nil {
+		return AffiliateInviteBonusDefault
+	}
+	bonus, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || bonus < 0 || math.IsNaN(bonus) || math.IsInf(bonus, 0) {
+		return AffiliateInviteBonusDefault
+	}
+	return bonus
+}
+
 // IsPasswordResetEnabled 检查是否启用密码重置功能
 // 要求：必须同时开启邮件验证
 func (s *SettingService) IsPasswordResetEnabled(ctx context.Context) bool {

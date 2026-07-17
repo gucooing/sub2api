@@ -299,6 +299,10 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		settings.AffiliateRebatePerInviteeCap = AffiliateRebatePerInviteeCapDefault
 	}
 	updates[SettingKeyAffiliateRebatePerInviteeCap] = strconv.FormatFloat(settings.AffiliateRebatePerInviteeCap, 'f', 8, 64)
+	if settings.AffiliateInviteBonus < 0 || math.IsNaN(settings.AffiliateInviteBonus) || math.IsInf(settings.AffiliateInviteBonus, 0) {
+		settings.AffiliateInviteBonus = AffiliateInviteBonusDefault
+	}
+	updates[SettingKeyAffiliateInviteBonus] = strconv.FormatFloat(settings.AffiliateInviteBonus, 'f', 8, 64)
 	updates[SettingKeyAffiliateAdminRechargeEnabled] = strconv.FormatBool(settings.AdminRechargeRebateEnabled)
 	updates[SettingKeyDefaultUserRPMLimit] = strconv.Itoa(settings.DefaultUserRPMLimit)
 	defaultSubsJSON, err := json.Marshal(settings.DefaultSubscriptions)

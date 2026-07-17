@@ -151,6 +151,7 @@ type UpdateSettingsRequest struct {
 	AffiliateRebateFreezeHours                *int                              `json:"affiliate_rebate_freeze_hours"`
 	AffiliateRebateDurationDays               *int                              `json:"affiliate_rebate_duration_days"`
 	AffiliateRebatePerInviteeCap              *float64                          `json:"affiliate_rebate_per_invitee_cap"`
+	AffiliateInviteBonus                      *float64                          `json:"affiliate_invite_bonus"`
 	AdminRechargeRebateEnabled                *bool                             `json:"affiliate_admin_recharge_enabled"`
 	DefaultUserRPMLimit                       int                               `json:"default_user_rpm_limit"`
 	DefaultSubscriptions                      []dto.DefaultSubscriptionSetting  `json:"default_subscriptions"`
@@ -396,6 +397,13 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 	if affiliateRebatePerInviteeCap < 0 {
 		affiliateRebatePerInviteeCap = service.AffiliateRebatePerInviteeCapDefault
+	}
+	affiliateInviteBonus := previousSettings.AffiliateInviteBonus
+	if req.AffiliateInviteBonus != nil {
+		affiliateInviteBonus = *req.AffiliateInviteBonus
+	}
+	if affiliateInviteBonus < 0 {
+		affiliateInviteBonus = service.AffiliateInviteBonusDefault
 	}
 	adminRechargeRebateEnabled := previousSettings.AdminRechargeRebateEnabled
 	if req.AdminRechargeRebateEnabled != nil {
@@ -1291,6 +1299,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		AffiliateRebateFreezeHours:             affiliateRebateFreezeHours,
 		AffiliateRebateDurationDays:            affiliateRebateDurationDays,
 		AffiliateRebatePerInviteeCap:           affiliateRebatePerInviteeCap,
+		AffiliateInviteBonus:                   affiliateInviteBonus,
 		AdminRechargeRebateEnabled:             adminRechargeRebateEnabled,
 		DefaultUserRPMLimit:                    req.DefaultUserRPMLimit,
 		DefaultSubscriptions:                   defaultSubscriptions,
@@ -1814,6 +1823,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		AffiliateRebateFreezeHours:                             updatedSettings.AffiliateRebateFreezeHours,
 		AffiliateRebateDurationDays:                            updatedSettings.AffiliateRebateDurationDays,
 		AffiliateRebatePerInviteeCap:                           updatedSettings.AffiliateRebatePerInviteeCap,
+		AffiliateInviteBonus:                                   updatedSettings.AffiliateInviteBonus,
 		AdminRechargeRebateEnabled:                             updatedSettings.AdminRechargeRebateEnabled,
 		DefaultUserRPMLimit:                                    updatedSettings.DefaultUserRPMLimit,
 		DefaultSubscriptions:                                   updatedDefaultSubscriptions,
