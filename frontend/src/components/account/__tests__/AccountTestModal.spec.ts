@@ -144,7 +144,39 @@ describe('AccountTestModal', () => {
     const [, options] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(options.body)).toMatchObject({
       model_id: 'gpt-5.4',
-      mode: 'compact'
+      mode: 'compact',
+      prompt: 'hi'
+    })
+  })
+
+  it('posts custom text prompt when provided', async () => {
+    const wrapper = mount(AccountTestModal, {
+      props: {
+        show: true,
+        account: buildAccount()
+      },
+      global: {
+        stubs: {
+          BaseDialog: BaseDialogStub,
+          Select: SelectStub,
+          TextArea: TextAreaStub,
+          Icon: true
+        }
+      }
+    })
+
+    await flushPromises()
+    ;(wrapper.vm as any).selectedModelId = 'gpt-5.4'
+    ;(wrapper.vm as any).testPrompt = 'ping from frontend'
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    const [, options] = (global.fetch as any).mock.calls[0]
+    expect(JSON.parse(options.body)).toMatchObject({
+      model_id: 'gpt-5.4',
+      prompt: 'ping from frontend',
+      mode: 'default'
     })
   })
 

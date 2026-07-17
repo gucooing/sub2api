@@ -145,7 +145,7 @@ describe('AccountTestModal', () => {
     expect(preview.attributes('src')).toBe('data:image/png;base64,QUJD')
   })
 
-  it('grok 账号测试默认选择 Grok 模型', async () => {
+  it('grok 账号测试默认选择 Grok 模型，空提示词前端默认传入 hi', async () => {
     getAvailableModels.mockResolvedValue([
       { id: 'grok-4.3', display_name: 'Grok 4.3' },
       { id: 'grok-build-0.1', display_name: 'Grok Build 0.1' }
@@ -168,6 +168,9 @@ describe('AccountTestModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
+    // Text test always shows prompt input
+    expect(wrapper.find('textarea.textarea-stub').exists()).toBe(true)
+
     const buttons = wrapper.findAll('button')
     const startButton = buttons.find((button) => button.text().includes('admin.accounts.startTest'))
     expect(startButton).toBeTruthy()
@@ -179,7 +182,39 @@ describe('AccountTestModal', () => {
     const [, request] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(request.body)).toEqual({
       model_id: 'grok-4.3',
-      prompt: ''
+      prompt: 'hi'
+    })
+  })
+
+  it('文本测试可传入自定义提示词', async () => {
+    getAvailableModels.mockResolvedValue([
+      { id: 'grok-4.3', display_name: 'Grok 4.3' }
+    ])
+    global.fetch = vi.fn().mockResolvedValue(
+      createStreamResponse([
+        'data: {"type":"test_complete","success":true}\n'
+      ])
+    ) as any
+
+    const wrapper = mountModal({
+      id: 13,
+      name: 'Grok Account',
+      platform: 'grok',
+      type: 'oauth',
+      status: 'active'
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    await wrapper.find('textarea.textarea-stub').setValue('ping from frontend')
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    const [, request] = (global.fetch as any).mock.calls[0]
+    expect(JSON.parse(request.body)).toMatchObject({
+      model_id: 'grok-4.3',
+      prompt: 'ping from frontend'
     })
   })
 
@@ -212,7 +247,7 @@ describe('AccountTestModal', () => {
     const [, request] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(request.body)).toMatchObject({
       model_id: 'gpt-5.4',
-      prompt: '',
+      prompt: 'hi',
       mode: 'compact'
     })
   })
