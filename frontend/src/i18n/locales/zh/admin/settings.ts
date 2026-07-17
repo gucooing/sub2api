@@ -131,6 +131,8 @@ export default {
       security: {
         sessionBinding: '会话 IP/UA 绑定',
         sessionBindingHint: '将登录会话与客户端 IP 和 User-Agent 绑定，任一变化即强制该会话失效并需重新登录（提升被盗凭证的利用门槛）。',
+        sensitiveOpsStepUp: '敏感操作二次验证 (2FA)',
+        sensitiveOpsStepUpHint: '开启后，账号/代理导出、数据库备份创建与下载、提升管理员等敏感操作需要近期完成 TOTP 二次验证。默认关闭。',
         auditRetention: '操作日志保留天数',
         auditRetentionHint: '超过该天数的操作日志将被自动清理；填 0 表示永久保留（仅支持手动清空）。'
       },

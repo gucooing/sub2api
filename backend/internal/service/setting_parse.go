@@ -262,6 +262,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 		InvitationCodeEnabled:            settings[SettingKeyInvitationCodeEnabled] == "true",
 		TotpEnabled:                      settings[SettingKeyTotpEnabled] == "true",
 		SessionBindingEnabled:            settings[SettingKeySessionBindingEnabled] != "false", // 默认开启
+		SensitiveOpsStepUpEnabled:        settings[SettingKeySensitiveOpsStepUpEnabled] == "true", // 默认关闭
 		AuditLogRetentionDays:            parseAuditLogRetentionDays(settings[SettingKeyAuditLogRetentionDays]),
 		LoginAgreementEnabled:            settings[SettingKeyLoginAgreementEnabled] == "true",
 		LoginAgreementMode:               normalizeLoginAgreementMode(settings[SettingKeyLoginAgreementMode]),

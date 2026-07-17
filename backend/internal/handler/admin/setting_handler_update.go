@@ -27,8 +27,9 @@ type UpdateSettingsRequest struct {
 	FrontendURL                      string                       `json:"frontend_url"`
 	InvitationCodeEnabled            bool                         `json:"invitation_code_enabled"`
 	TotpEnabled                      bool                         `json:"totp_enabled"`             // TOTP 双因素认证
-	SessionBindingEnabled            bool                         `json:"session_binding_enabled"`  // 会话 IP/UA 绑定
-	AuditLogRetentionDays            int                          `json:"audit_log_retention_days"` // 审计日志保留天数
+	SessionBindingEnabled            bool                         `json:"session_binding_enabled"`       // 会话 IP/UA 绑定
+	SensitiveOpsStepUpEnabled        bool                         `json:"sensitive_ops_step_up_enabled"` // 敏感操作 step-up 2FA
+	AuditLogRetentionDays            int                          `json:"audit_log_retention_days"`      // 审计日志保留天数
 	LoginAgreementEnabled            bool                         `json:"login_agreement_enabled"`
 	LoginAgreementMode               string                       `json:"login_agreement_mode"`
 	LoginAgreementUpdatedAt          string                       `json:"login_agreement_updated_at"`
@@ -1190,6 +1191,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		InvitationCodeEnabled:            req.InvitationCodeEnabled,
 		TotpEnabled:                      req.TotpEnabled,
 		SessionBindingEnabled:            req.SessionBindingEnabled,
+		SensitiveOpsStepUpEnabled:        req.SensitiveOpsStepUpEnabled,
 		AuditLogRetentionDays:            req.AuditLogRetentionDays,
 		LoginAgreementEnabled:            req.LoginAgreementEnabled,
 		LoginAgreementMode:               loginAgreementMode,
@@ -1719,6 +1721,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		TotpEnabled:                                            updatedSettings.TotpEnabled,
 		TotpEncryptionKeyConfigured:                            h.settingService.IsTotpEncryptionKeyConfigured(),
 		SessionBindingEnabled:                                  updatedSettings.SessionBindingEnabled,
+		SensitiveOpsStepUpEnabled:                              updatedSettings.SensitiveOpsStepUpEnabled,
 		AuditLogRetentionDays:                                  updatedSettings.AuditLogRetentionDays,
 		LoginAgreementEnabled:                                  updatedSettings.LoginAgreementEnabled,
 		LoginAgreementMode:                                     updatedSettings.LoginAgreementMode,

@@ -203,6 +203,19 @@ func (s *SettingService) IsSessionBindingEnabled(ctx context.Context) bool {
 	return value != "false"
 }
 
+// IsSensitiveOpsStepUpEnabled 检查敏感操作是否要求 step-up 2FA（默认关闭）。
+// 关闭时账号/代理导出、备份下载、提升管理员等路径不再强制二次验证。
+func (s *SettingService) IsSensitiveOpsStepUpEnabled(ctx context.Context) bool {
+	if s == nil || s.settingRepo == nil {
+		return false
+	}
+	value, err := s.settingRepo.GetValue(ctx, SettingKeySensitiveOpsStepUpEnabled)
+	if err != nil {
+		return false // 默认关闭
+	}
+	return value == "true"
+}
+
 // defaultAuditLogRetentionDays 审计日志默认保留天数。
 const defaultAuditLogRetentionDays = 180
 

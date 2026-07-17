@@ -174,6 +174,9 @@ const (
 	// 会话安全设置
 	SettingKeySessionBindingEnabled = "session_binding_enabled" // 会话 IP/UA 绑定（变更即失效），默认开启
 
+	// 敏感操作 step-up 2FA（账号/代理导出、备份、提升管理员等）。默认关闭。
+	SettingKeySensitiveOpsStepUpEnabled = "sensitive_ops_step_up_enabled"
+
 	// 操作审计日志设置
 	SettingKeyAuditLogRetentionDays = "audit_log_retention_days" // 审计日志保留天数（<=0 永久保留），默认 180
 

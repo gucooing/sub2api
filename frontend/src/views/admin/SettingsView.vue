@@ -1593,6 +1593,21 @@
                 <Toggle v-model="form.session_binding_enabled" />
               </div>
 
+              <!-- 敏感操作 step-up 2FA -->
+              <div
+                class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
+              >
+                <div>
+                  <label class="font-medium text-gray-900 dark:text-white">{{
+                    t("admin.settings.security.sensitiveOpsStepUp")
+                  }}</label>
+                  <p class="text-sm text-gray-500 dark:text-gray-400">
+                    {{ t("admin.settings.security.sensitiveOpsStepUpHint") }}
+                  </p>
+                </div>
+                <Toggle v-model="form.sensitive_ops_step_up_enabled" />
+              </div>
+
               <!-- 审计日志保留天数 -->
               <div
                 class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
@@ -8210,6 +8225,7 @@ const form = reactive<SettingsForm>({
   totp_enabled: false,
   totp_encryption_key_configured: false,
   session_binding_enabled: true,
+  sensitive_ops_step_up_enabled: false,
   audit_log_retention_days: 180,
   login_agreement_enabled: false,
   login_agreement_mode: "modal",
@@ -9577,6 +9593,7 @@ async function saveSettings() {
       password_reset_enabled: form.password_reset_enabled,
       totp_enabled: form.totp_enabled,
       session_binding_enabled: form.session_binding_enabled,
+      sensitive_ops_step_up_enabled: form.sensitive_ops_step_up_enabled,
       // 清空数字框时 v-model.number 会得到空串，后端 int 字段解析空串会 400 拒绝整次保存；
       // 空/非法值回退默认 180（与后端 parseAuditLogRetentionDays("") 语义一致，0 仍表示永久保留）。
       audit_log_retention_days: Number.isFinite(form.audit_log_retention_days)

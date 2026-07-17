@@ -22,6 +22,11 @@ type stepUpUserReader interface {
 	GetByID(ctx context.Context, id int64) (*service.User, error)
 }
 
+// stepUpFeatureToggle 抽象“敏感操作是否要求 step-up”的系统开关。
+type stepUpFeatureToggle interface {
+	IsSensitiveOpsStepUpEnabled(ctx context.Context) bool
+}
+
 // StepUpSessionKey 计算 step-up 授权的会话键：
 // 优先绑定当前会话（refresh token family），无会话 ID 的旧 token 退化为用户级键。
 func StepUpSessionKey(c *gin.Context, userID int64) string {
@@ -33,19 +38,20 @@ func StepUpSessionKey(c *gin.Context, userID int64) string {
 
 // NewStepUpAuthMiddleware 创建敏感操作 step-up 2FA 门控中间件。
 //
-// 通过条件（全部满足）：
+// 系统设置 sensitive_ops_step_up_enabled 关闭时直接放行（默认关闭）。
+// 开启后的通过条件（全部满足）：
 //  1. 必须是 JWT 认证的真人会话——admin API key（机器凭证）一律拒绝
 //  2. 当前用户已启用 TOTP（未启用则拒绝并提示先启用 2FA）
 //  3. 当前会话在有效期内完成过 TOTP step-up 验证（POST /api/v1/user/totp/step-up）
 //
 // 失败响应使用可区分的错误码，前端据此弹出 TOTP 验证对话框后重试。
-func NewStepUpAuthMiddleware(totpService *service.TotpService, userService *service.UserService) StepUpAuthMiddleware {
-	return StepUpAuthMiddleware(stepUpAuth(totpService, userService))
+func NewStepUpAuthMiddleware(totpService *service.TotpService, userService *service.UserService, settingService *service.SettingService) StepUpAuthMiddleware {
+	return StepUpAuthMiddleware(stepUpAuth(totpService, userService, settingService))
 }
 
-func stepUpAuth(grantChecker stepUpGrantChecker, userReader stepUpUserReader) gin.HandlerFunc {
+func stepUpAuth(grantChecker stepUpGrantChecker, userReader stepUpUserReader, featureToggle stepUpFeatureToggle) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !enforceStepUp(c, grantChecker, userReader) {
+		if !enforceStepUp(c, grantChecker, userReader, featureToggle) {
 			return
 		}
 		c.Next()
@@ -55,11 +61,17 @@ func stepUpAuth(grantChecker stepUpGrantChecker, userReader stepUpUserReader) gi
 // EnforceStepUp 对当前请求执行与 StepUpAuthMiddleware 相同语义的 step-up 门控，
 // 供 handler 在需要按请求内容条件触发时调用（如仅当把用户角色提升为管理员时）。
 // 校验失败时写入错误响应并中止请求，返回 false；通过返回 true。
-func EnforceStepUp(c *gin.Context, totpService *service.TotpService, userService *service.UserService) bool {
-	return enforceStepUp(c, totpService, userService)
+// featureToggle 可为 nil：视为未启用敏感操作 2FA（放行）。
+func EnforceStepUp(c *gin.Context, totpService *service.TotpService, userService *service.UserService, settingService *service.SettingService) bool {
+	return enforceStepUp(c, totpService, userService, settingService)
 }
 
-func enforceStepUp(c *gin.Context, grantChecker stepUpGrantChecker, userReader stepUpUserReader) bool {
+func enforceStepUp(c *gin.Context, grantChecker stepUpGrantChecker, userReader stepUpUserReader, featureToggle stepUpFeatureToggle) bool {
+	// 默认关闭：仅当管理员显式开启“敏感操作 2FA”时才门控。
+	if featureToggle == nil || !featureToggle.IsSensitiveOpsStepUpEnabled(c.Request.Context()) {
+		return true
+	}
+
 	if c.GetString("auth_method") == service.AuditAuthMethodAdminAPIKey {
 		AbortWithError(c, 403, "STEP_UP_ADMIN_API_KEY_FORBIDDEN",
 			"Admin API key cannot access this endpoint; a two-factor verified admin session is required")

@@ -34,10 +34,11 @@ type SystemSettings struct {
 	PasswordResetEnabled             bool                     `json:"password_reset_enabled"`
 	FrontendURL                      string                   `json:"frontend_url"`
 	InvitationCodeEnabled            bool                     `json:"invitation_code_enabled"`
-	TotpEnabled                      bool                     `json:"totp_enabled"`                   // TOTP 双因素认证
-	TotpEncryptionKeyConfigured      bool                     `json:"totp_encryption_key_configured"` // TOTP 加密密钥是否已配置
-	SessionBindingEnabled            bool                     `json:"session_binding_enabled"`        // 会话 IP/UA 绑定
-	AuditLogRetentionDays            int                      `json:"audit_log_retention_days"`       // 审计日志保留天数
+	TotpEnabled                      bool                     `json:"totp_enabled"`                    // TOTP 双因素认证
+	TotpEncryptionKeyConfigured      bool                     `json:"totp_encryption_key_configured"`  // TOTP 加密密钥是否已配置
+	SessionBindingEnabled            bool                     `json:"session_binding_enabled"`         // 会话 IP/UA 绑定
+	SensitiveOpsStepUpEnabled        bool                     `json:"sensitive_ops_step_up_enabled"`   // 敏感操作是否要求 step-up 2FA
+	AuditLogRetentionDays            int                      `json:"audit_log_retention_days"`        // 审计日志保留天数
 	LoginAgreementEnabled            bool                     `json:"login_agreement_enabled"`
 	LoginAgreementMode               string                   `json:"login_agreement_mode"`
 	LoginAgreementUpdatedAt          string                   `json:"login_agreement_updated_at"`

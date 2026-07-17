@@ -124,6 +124,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		TotpEnabled:                                            settings.TotpEnabled,
 		TotpEncryptionKeyConfigured:                            h.settingService.IsTotpEncryptionKeyConfigured(),
 		SessionBindingEnabled:                                  settings.SessionBindingEnabled,
+		SensitiveOpsStepUpEnabled:                              settings.SensitiveOpsStepUpEnabled,
 		AuditLogRetentionDays:                                  settings.AuditLogRetentionDays,
 		LoginAgreementEnabled:                                  settings.LoginAgreementEnabled,
 		LoginAgreementMode:                                     settings.LoginAgreementMode,
