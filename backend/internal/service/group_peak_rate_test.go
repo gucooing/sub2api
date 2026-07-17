@@ -98,30 +98,27 @@ func mustLoad(name string) *time.Location {
 func TestValidatePeakRateConfig(t *testing.T) {
 	cases := []struct {
 		name    string
-		subType string
 		enabled bool
 		start   string
 		end     string
 		mult    float64
 		wantErr bool
 	}{
-		{"disabled passes through", "subscription", false, "", "", 0, false},
-		{"subscription enabled valid", "subscription", true, "14:00", "18:00", 3.0, false},
-		{"standard enabled rejected", "standard", true, "14:00", "18:00", 3.0, true},
-		{"empty type treated as standard", "", true, "14:00", "18:00", 3.0, true},
-		{"standard disabled passes", "standard", false, "", "", 0, false},
-		{"enabled empty start", "subscription", true, "", "18:00", 1.0, true},
-		{"enabled empty end", "subscription", true, "14:00", "", 1.0, true},
-		{"enabled malformed start", "subscription", true, "99:99", "18:00", 1.0, true},
-		{"enabled malformed end", "subscription", true, "14:00", "25:00", 1.0, true},
-		{"enabled equal start==end", "subscription", true, "14:00", "14:00", 1.0, true},
-		{"enabled cross-day rejected", "subscription", true, "22:00", "02:00", 1.0, true},
-		{"enabled negative multiplier", "subscription", true, "14:00", "18:00", -0.5, true},
-		{"enabled zero multiplier allowed", "subscription", true, "14:00", "18:00", 0, false},
+		{"disabled passes through", false, "", "", 0, false},
+		{"enabled valid", true, "14:00", "18:00", 3.0, false},
+		{"disabled with leftover window passes", false, "14:00", "18:00", 3.0, false},
+		{"enabled empty start", true, "", "18:00", 1.0, true},
+		{"enabled empty end", true, "14:00", "", 1.0, true},
+		{"enabled malformed start", true, "99:99", "18:00", 1.0, true},
+		{"enabled malformed end", true, "14:00", "25:00", 1.0, true},
+		{"enabled equal start==end", true, "14:00", "14:00", 1.0, true},
+		{"enabled cross-day rejected", true, "22:00", "02:00", 1.0, true},
+		{"enabled negative multiplier", true, "14:00", "18:00", -0.5, true},
+		{"enabled zero multiplier allowed", true, "14:00", "18:00", 0, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := ValidatePeakRateConfig(c.subType, c.enabled, c.start, c.end, c.mult)
+			err := ValidatePeakRateConfig(c.enabled, c.start, c.end, c.mult)
 			if c.wantErr && err == nil {
 				t.Fatalf("expect error, got nil")
 			}
@@ -132,17 +129,34 @@ func TestValidatePeakRateConfig(t *testing.T) {
 	}
 }
 
-func TestPeakMultiplierAt_StandardTypeDegradesToOne(t *testing.T) {
+func TestPeakMultiplierAt_StandardTypeAlsoApplies(t *testing.T) {
 	g := newPeakGroup(true, "14:00", "18:00", 3.0)
 	g.SubscriptionType = "standard"
-	if got := g.PeakMultiplierAt(at(15, 30)); got != 1.0 {
-		t.Fatalf("standard group must degrade to 1.0, got %v", got)
+	if got := g.PeakMultiplierAt(at(15, 30)); got != 3.0 {
+		t.Fatalf("standard group peak multiplier: got %v, want 3.0", got)
 	}
 
 	sub := newPeakGroup(true, "14:00", "18:00", 3.0)
 	sub.SubscriptionType = "subscription"
 	if got := sub.PeakMultiplierAt(at(15, 30)); got != 3.0 {
 		t.Fatalf("subscription group peak multiplier: got %v, want 3.0", got)
+	}
+}
+
+func TestNormalizePeakRateConfig_PreservesAcrossTypes(t *testing.T) {
+	enabled, start, end, mult := NormalizePeakRateConfig(true, "14:00", "18:00", 2.5)
+	if !enabled || start != "14:00" || end != "18:00" || mult != 2.5 {
+		t.Fatalf("enabled config should pass through: got %v %q %q %v", enabled, start, end, mult)
+	}
+
+	enabled, start, end, mult = NormalizePeakRateConfig(false, "14:00", "18:00", 2.5)
+	if enabled || start != "14:00" || end != "18:00" || mult != 2.5 {
+		t.Fatalf("disabled config should keep window: got %v %q %q %v", enabled, start, end, mult)
+	}
+
+	enabled, start, end, mult = NormalizePeakRateConfig(false, "bad", "also-bad", -1)
+	if enabled || start != "" || end != "" || mult != 1.0 {
+		t.Fatalf("disabled dirty config should be cleaned: got %v %q %q %v", enabled, start, end, mult)
 	}
 }
 
