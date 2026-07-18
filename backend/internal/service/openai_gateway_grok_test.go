@@ -1810,11 +1810,50 @@ func TestHandleGrokAccountUpstreamError429UsesFallbackReset(t *testing.T) {
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	before := time.Now()
 
+	// Bare 429 without free-usage-exhausted and without unlock headers is temporary.
 	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, nil, nil)
 
+	require.Zero(t, repo.rateLimitedCalls)
+	require.Equal(t, 1, repo.tempUnschedCalls)
+	require.Equal(t, "grok temporary rate limit", repo.lastTempUnschedReason)
+	require.True(t, repo.lastTempUnschedUntil.After(before.Add(grokRateLimitFallbackCooldown-time.Second)))
+	require.True(t, repo.lastTempUnschedUntil.Before(before.Add(grokRateLimitFallbackCooldown+time.Second)))
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+}
+
+func TestHandleGrokAccountUpstreamErrorFreeUsageExhaustedSets24hRateLimit(t *testing.T) {
+	account := &Account{ID: 64, Platform: PlatformGrok, Type: AccountTypeOAuth}
+	repo := &grokQuotaAccountRepo{}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	before := time.Now()
+	body := []byte("{\"code\":\"subscription:free-usage-exhausted\",\"error\":\"You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window\"}")
+
+	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, nil, body)
+
 	require.Equal(t, 1, repo.rateLimitedCalls)
-	require.WithinDuration(t, before.Add(grokRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
+	require.WithinDuration(t, before.Add(grokFreeUsageExhaustedCooldown), repo.lastRateLimitResetAt, time.Second)
 	require.Zero(t, repo.tempUnschedCalls)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.NotNil(t, account.RateLimitResetAt)
+}
+
+func TestHandleGrokAccountUpstreamErrorFreeUsageExhaustedDoesNotRefreshActiveLimit(t *testing.T) {
+	existingReset := time.Now().Add(20 * time.Hour).UTC().Truncate(time.Second)
+	existingLimited := existingReset.Add(-4 * time.Hour)
+	account := &Account{
+		ID: 65, Platform: PlatformGrok, Type: AccountTypeOAuth,
+		RateLimitedAt: &existingLimited, RateLimitResetAt: &existingReset,
+	}
+	repo := &grokQuotaAccountRepo{}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	body := []byte("{\"code\":\"subscription:free-usage-exhausted\",\"error\":\"You've used all the included free usage\"}")
+
+	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, nil, body)
+
+	// Already rate_limited: countdown must not be refreshed by another free-usage 429.
+	require.Zero(t, repo.rateLimitedCalls)
+	require.Equal(t, existingReset, *account.RateLimitResetAt)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
 func TestGrokRateLimitResetAtForAccountEscalatesRepeated429s(t *testing.T) {
@@ -2126,6 +2165,9 @@ func TestOpenAIWSHTTPBridgeGrok429PersistsRateLimit(t *testing.T) {
 
 	require.Error(t, err)
 	require.Nil(t, result)
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
 	require.Equal(t, 1, repo.rateLimitedCalls)
 	require.WithinDuration(t, before.Add(45*time.Second), repo.lastRateLimitResetAt, time.Second)
 	require.Zero(t, repo.tempUnschedCalls)

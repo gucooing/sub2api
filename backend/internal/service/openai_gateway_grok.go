@@ -25,11 +25,17 @@ const (
 	grokUpstreamUserAgent                  = "sub2api-grok/1.0"
 	grokCLIVersion                         = "0.2.93"
 	grokDefaultResponsesModel              = "grok-4.5"
-	grokRateLimitFallbackCooldown          = 2 * time.Minute
-	grokRateLimitRepeatCooldown            = 10 * time.Minute
-	grokRateLimitSustainedCooldown         = 30 * time.Minute
-	grokRateLimitMaxAdaptiveCooldown       = time.Hour
-	grokRateLimitBackoffQuietPeriod        = time.Hour
+	// Short RPM/TPM style 429s with no authoritative reset still need a brief
+	// local pause so the scheduler does not immediately reselect the same account.
+	grokRateLimitFallbackCooldown = 2 * time.Minute
+	// Free-tier allowance exhaustion (subscription:free-usage-exhausted) resets over a
+	// rolling 24-hour window. Mark as durable rate_limited (限流中) for that full
+	// window so the account does not re-enter the pool after the short RPM pause.
+	grokFreeUsageExhaustedCooldown = 24 * time.Hour
+	grokRateLimitRepeatCooldown       = 10 * time.Minute
+	grokRateLimitSustainedCooldown    = 30 * time.Minute
+	grokRateLimitMaxAdaptiveCooldown  = time.Hour
+	grokRateLimitBackoffQuietPeriod   = time.Hour
 )
 
 func (s *OpenAIGatewayService) forwardGrokResponses(
@@ -826,8 +832,9 @@ func (s *OpenAIGatewayService) updateGrokUsageSnapshot(ctx context.Context, acco
 	// responses can still consume the last available request/token, so persist
 	// that exhausted window here as a real rate limit rather than relying only
 	// on the passive snapshot scheduler check.
+	// Free-usage 24h pauses and active countdowns are not refreshed from probes.
 	if hasActiveLimit {
-		s.rateLimitGrok(stateCtx, account, resetAt)
+		s.rateLimitGrokWithSnapshot(stateCtx, account, snapshot, resetAt)
 	} else if recovery {
 		clearGrokRateLimitAfterRecovery(stateCtx, s.accountRepo, account)
 	}
@@ -857,6 +864,61 @@ func parseGrokQuotaSnapshot(headers http.Header, statusCode int, now time.Time) 
 		}
 	}
 	return snapshot
+}
+
+// isGrokFreeUsageExhaustedError matches xAI Free-tier allowance exhaustion only.
+// Observed body:
+//
+//	{"code":"subscription:free-usage-exhausted","error":"You've used all the
+//	included free usage for model ... Usage resets over a rolling 24-hour window..."}
+//
+// Other Grok 429s keep the short temporary cooldown path.
+func isGrokFreeUsageExhaustedError(statusCode int, responseBody []byte) bool {
+	if statusCode != http.StatusTooManyRequests || len(responseBody) == 0 {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(responseBody, "code").String()))
+	if strings.Contains(code, "free-usage-exhausted") || strings.Contains(code, "free_usage_exhausted") {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(string(responseBody)))
+	if strings.Contains(lower, "free-usage-exhausted") || strings.Contains(lower, "free_usage_exhausted") {
+		return true
+	}
+	// Message form without the exact code field.
+	if strings.Contains(lower, "included free usage") ||
+		strings.Contains(lower, "used all the included free usage") {
+		return true
+	}
+	// Rolling 24h free-window language is treated as free-usage exhaustion only
+	// when free-usage wording is also present (avoid classifying generic RPM 429s).
+	if strings.Contains(lower, "rolling 24-hour") &&
+		(strings.Contains(lower, "free usage") || strings.Contains(lower, "free-usage")) {
+		return true
+	}
+	return false
+}
+
+// markGrokFreeUsageExhaustedSnapshot tags a 429 snapshot so reset selection uses
+// the full 24h free-usage window (限流中) instead of the short RPM fallback.
+func markGrokFreeUsageExhaustedSnapshot(snapshot *xai.QuotaSnapshot, responseBody []byte, now time.Time) {
+	if snapshot == nil || !isGrokFreeUsageExhaustedError(snapshot.StatusCode, responseBody) {
+		return
+	}
+	snapshot.StatusCode = http.StatusTooManyRequests
+	if strings.TrimSpace(snapshot.UpdatedAt) == "" {
+		snapshot.UpdatedAt = now.UTC().Format(time.RFC3339)
+	}
+	if snapshot.Headers == nil {
+		snapshot.Headers = make(map[string]string)
+	}
+	snapshot.Headers["x-sub2api-grok-free-usage-exhausted"] = "1"
+}
+
+func grokQuotaSnapshotIsFreeUsageExhausted(snapshot *xai.QuotaSnapshot) bool {
+	return snapshot != nil &&
+		snapshot.Headers != nil &&
+		snapshot.Headers["x-sub2api-grok-free-usage-exhausted"] == "1"
 }
 
 func normalizeGrokExhaustedWindowResets(snapshot *xai.QuotaSnapshot, resetAt, now time.Time) {
@@ -929,15 +991,36 @@ func grokRateLimitResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time
 	if retryAfterExpired {
 		return time.Time{}, false
 	}
-	if exhausted || snapshot.StatusCode == http.StatusTooManyRequests {
+	if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
+		// Grok Free free-usage-exhausted has no unlock clock from xAI.
+		return now.Add(grokFreeUsageExhaustedCooldown), true
+	}
+	if exhausted {
+		// remaining=0 windows without a future reset still need a short pause.
 		return now.Add(grokRateLimitFallbackCooldown), true
 	}
+	// Bare 429 without free-usage signal and without window/header reset is
+	// handled as temporary unschedulable by the caller, not durable rate_limited.
 	return time.Time{}, false
 }
 
 func grokRateLimitResetAtForAccount(account *Account, snapshot *xai.QuotaSnapshot, now time.Time) (time.Time, bool) {
 	resetAt, limited := grokRateLimitResetAt(snapshot, now)
-	if !limited || !isGrokOAuthAccount(account) || snapshot == nil || snapshot.StatusCode != http.StatusTooManyRequests {
+	if !limited {
+		return resetAt, false
+	}
+
+	// Free-usage-exhausted has no upstream reset clock. Once already rate_limited,
+	// never re-arm from now+24h (probes/tests/repeats would otherwise push the
+	// deadline indefinitely). Keep the existing RateLimitResetAt.
+	if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
+		if account != nil && account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
+			return *account.RateLimitResetAt, true
+		}
+		return resetAt, true
+	}
+
+	if !isGrokOAuthAccount(account) || snapshot == nil || snapshot.StatusCode != http.StatusTooManyRequests {
 		return resetAt, limited
 	}
 	if account.RateLimitedAt == nil || account.RateLimitResetAt == nil {
@@ -964,6 +1047,25 @@ func grokRateLimitResetAtForAccount(account *Account, snapshot *xai.QuotaSnapsho
 		resetAt = adaptiveResetAt
 	}
 	return resetAt, true
+}
+
+// shouldPersistGrokRateLimit reports whether a newly computed rate-limit boundary
+// should be written. Free-usage and probe/test paths must not refresh an active
+// rate_limited countdown by overwriting it with now+duration.
+func shouldPersistGrokRateLimit(account *Account, snapshot *xai.QuotaSnapshot, resetAt, now time.Time) bool {
+	if account == nil || !resetAt.After(now) {
+		return false
+	}
+	// Already rate_limited: only allow a strictly later authoritative boundary
+	// (e.g. a longer window reset from headers). Never roll forward a free-usage
+	// 24h pause that was computed from "now".
+	if account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
+		if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
+			return false
+		}
+		return resetAt.After(*account.RateLimitResetAt)
+	}
+	return true
 }
 
 func normalizeGrokRateLimitResetAt(account *Account, resetAt, now time.Time) time.Time {
@@ -1008,10 +1110,18 @@ func clearGrokRateLimitAfterRecovery(ctx context.Context, repo AccountRepository
 }
 
 func persistGrokRateLimit(ctx context.Context, repo AccountRepository, account *Account, resetAt time.Time) {
+	persistGrokRateLimitWithSnapshot(ctx, repo, account, nil, resetAt)
+}
+
+func persistGrokRateLimitWithSnapshot(ctx context.Context, repo AccountRepository, account *Account, snapshot *xai.QuotaSnapshot, resetAt time.Time) {
 	if repo == nil || account == nil || account.ID <= 0 {
 		return
 	}
-	resetAt = normalizeGrokRateLimitResetAt(account, resetAt, time.Now())
+	now := time.Now()
+	resetAt = normalizeGrokRateLimitResetAt(account, resetAt, now)
+	if !shouldPersistGrokRateLimit(account, snapshot, resetAt, now) {
+		return
+	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
 	var err error
@@ -1022,21 +1132,39 @@ func persistGrokRateLimit(ctx context.Context, repo AccountRepository, account *
 	}
 	if err != nil {
 		slog.Warn("persist_grok_rate_limit_failed", "account_id", account.ID, "reset_at", resetAt.UTC(), "error", err)
+		return
 	}
+	// Keep in-memory view aligned so subsequent probe/test calls on the same
+	// account object also see the active rate_limited window.
+	limitedAt := now
+	account.RateLimitedAt = &limitedAt
+	account.RateLimitResetAt = &resetAt
 }
 
 func (s *OpenAIGatewayService) rateLimitGrok(ctx context.Context, account *Account, resetAt time.Time) {
+	s.rateLimitGrokWithSnapshot(ctx, account, nil, resetAt)
+}
+
+func (s *OpenAIGatewayService) rateLimitGrokWithSnapshot(ctx context.Context, account *Account, snapshot *xai.QuotaSnapshot, resetAt time.Time) {
 	if s == nil || account == nil {
 		return
 	}
-	resetAt = normalizeGrokRateLimitResetAt(account, resetAt, time.Now())
+	now := time.Now()
+	resetAt = normalizeGrokRateLimitResetAt(account, resetAt, now)
+	if !shouldPersistGrokRateLimit(account, snapshot, resetAt, now) {
+		// Still keep runtime block at the existing deadline when already limited.
+		if account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
+			s.BlockAccountScheduling(account, *account.RateLimitResetAt, "429")
+		}
+		return
+	}
 
 	runtimeUntil := resetAt
 	if account.TempUnschedulableUntil != nil && account.TempUnschedulableUntil.After(runtimeUntil) {
 		runtimeUntil = *account.TempUnschedulableUntil
 	}
 	s.BlockAccountScheduling(account, runtimeUntil, "429")
-	persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
+	persistGrokRateLimitWithSnapshot(ctx, s.accountRepo, account, snapshot, resetAt)
 }
 
 func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte) {
@@ -1044,20 +1172,92 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 		return
 	}
 	now := time.Now()
-	s.updateGrokUsageSnapshot(ctx, account, parseGrokQuotaSnapshot(headers, statusCode, now))
+	snapshot := parseGrokQuotaSnapshot(headers, statusCode, now)
+	// Only Grok Free free-usage-exhausted lacks an authoritative unlock time.
+	// Tag that case so we enter durable rate_limited for 24h; everything else
+	// keeps header-driven rate limits or short temp-unschedulable cooldowns.
+	markGrokFreeUsageExhaustedSnapshot(snapshot, responseBody, now)
+
 	switch statusCode {
 	case http.StatusUnauthorized:
+		s.updateGrokUsageSnapshot(ctx, account, snapshot)
 		s.tempUnscheduleGrok(ctx, account, 10*time.Minute, "grok credentials unauthorized")
 	case http.StatusForbidden:
+		s.updateGrokUsageSnapshot(ctx, account, snapshot)
 		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok access or entitlement denied")
 	case http.StatusTooManyRequests:
-		// updateGrokUsageSnapshot installs both runtime and durable rate-limit state.
+		if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
+			// Persist snapshot + 24h rate_limited (限流中). Do not refresh if already limited.
+			s.updateGrokUsageSnapshot(ctx, account, snapshot)
+			if resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, now); limited {
+				s.rateLimitGrokWithSnapshot(ctx, account, snapshot, resetAt)
+			}
+			return
+		}
+		// Header-driven remaining=0 / Retry-After → durable rate limit at that boundary
+		// (updateGrokUsageSnapshot also persists rate_limited via rateLimitGrokWithSnapshot).
+		_, limited := grokRateLimitResetAtForAccount(account, snapshot, now)
+		if limited && !isBareGrok429WithoutReset(snapshot, now) {
+			s.updateGrokUsageSnapshot(ctx, account, snapshot)
+			return
+		}
+		// Bare 429 without free-usage signal and without unlock time → temp unusable.
+		// Persist snapshot for UI/debug but do not enter durable rate_limited.
+		if snapshot != nil && s.accountRepo != nil {
+			stateCtx, cancel := openAIAccountStateContext(ctx)
+			_ = s.accountRepo.UpdateExtra(stateCtx, account.ID, map[string]any{
+				grokQuotaSnapshotExtraKey: snapshot,
+			})
+			cancel()
+		}
+		s.tempUnscheduleGrok(ctx, account, grokRateLimitFallbackCooldown, "grok temporary rate limit")
 	default:
+		if snapshot != nil {
+			s.updateGrokUsageSnapshot(ctx, account, snapshot)
+		}
 		if statusCode >= 500 {
 			s.tempUnscheduleGrok(ctx, account, 2*time.Minute, "grok upstream temporary error")
 		}
 	}
-	_ = responseBody
+}
+
+// isBareGrok429WithoutReset is true when status is 429 but neither Retry-After
+// nor an exhausted window reset is available. Free-usage is handled separately.
+func isBareGrok429WithoutReset(snapshot *xai.QuotaSnapshot, now time.Time) bool {
+	if snapshot == nil || snapshot.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+	if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
+		return false
+	}
+	if snapshot.RetryAfterSeconds != nil && *snapshot.RetryAfterSeconds > 0 {
+		observedAt := now
+		if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(snapshot.UpdatedAt)); err == nil {
+			observedAt = parsed
+		}
+		if observedAt.Add(time.Duration(*snapshot.RetryAfterSeconds) * time.Second).After(now) {
+			return false
+		}
+	}
+	for _, window := range []*xai.QuotaWindow{snapshot.Requests, snapshot.Tokens} {
+		if window == nil || window.Remaining == nil || *window.Remaining > 0 {
+			continue
+		}
+		if window.ResetUnix != nil && *window.ResetUnix > now.Unix() {
+			return false
+		}
+		if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(window.ResetAt)); err == nil && parsed.After(now) {
+			return false
+		}
+	}
+	// remaining=0 without future reset still counts as exhausted-window signal
+	// for updateGrokUsageSnapshot fallback; treat as not bare only when exhausted.
+	for _, window := range []*xai.QuotaWindow{snapshot.Requests, snapshot.Tokens} {
+		if window != nil && window.Remaining != nil && *window.Remaining <= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *OpenAIGatewayService) tempUnscheduleGrok(ctx context.Context, account *Account, cooldown time.Duration, reason string) {

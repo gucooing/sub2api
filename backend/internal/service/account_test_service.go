@@ -788,7 +788,13 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 	defer func() { _ = resp.Body.Close() }()
 
 	now := time.Now()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	snapshot := parseGrokQuotaSnapshot(resp.Header, resp.StatusCode, now)
+	if snapshot != nil {
+		// Only free-usage-exhausted (Grok Free, no unlock clock) enters 24h rate_limited.
+		// Tests must not refresh an existing rate_limited countdown.
+		markGrokFreeUsageExhaustedSnapshot(snapshot, body, now)
+	}
 	if snapshot != nil && s.accountRepo != nil {
 		resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, now)
 		if limited {
@@ -798,7 +804,7 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 			grokQuotaSnapshotExtraKey: snapshot,
 		})
 		if limited {
-			persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
+			persistGrokRateLimitWithSnapshot(ctx, s.accountRepo, account, snapshot, resetAt)
 		} else if isSuccessfulGrokRateLimitRecovery(account, snapshot) {
 			clearGrokRateLimitAfterRecovery(ctx, s.accountRepo, account)
 		}
@@ -807,10 +813,10 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok Responses API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 	return s.processOpenAIStream(c, resp.Body)
 }
 

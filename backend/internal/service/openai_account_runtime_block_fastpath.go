@@ -18,10 +18,14 @@ const (
 	openAIOAuth429StormMaxAccountSwitches = 1
 )
 
-// OpenAIOAuth429FailoverState tracks the request-local follow-up budget after
-// the first Grok OAuth 429. Once that 429 occurs, exactly one different account
-// may be attempted; any failure from that follow-up account ends failover.
+// OpenAIOAuth429FailoverState tracks request-local OAuth 429 failover budget.
+// OpenAI OAuth still uses the storm circuit breaker. Grok OAuth 429s are
+// account-local quota/rate signals and must keep switching within the handler's
+// normal maxAccountSwitches budget so a single exhausted Free account does not
+// surface 429 to the client while healthy accounts remain in the pool.
 type OpenAIOAuth429FailoverState struct {
+	// retained for binary/API compatibility with older call sites; no longer
+	// used to truncate Grok failover after one follow-up attempt.
 	grokOAuth429FollowupPending bool
 }
 
@@ -314,25 +318,16 @@ func (s *OpenAIGatewayService) ShouldStopOpenAIOAuth429Failover(account *Account
 	if failedSwitches < openAIOAuth429StormMaxAccountSwitches {
 		return false
 	}
-	if state != nil && state.grokOAuth429FollowupPending {
-		// The follow-up budget was armed by a Grok OAuth 429. Consume it on
-		// any failing follow-up account, even if a mixed pool selected an API-key
-		// account next.
-		return true
-	}
-	if isGrokOAuthAccount(account) {
-		if state == nil {
-			// Preserve the old threshold for callers that have not adopted the
-			// request-local state contract yet.
-			return statusCode == http.StatusTooManyRequests && failedSwitches >= 2
-		}
-		if statusCode == http.StatusTooManyRequests {
-			state.grokOAuth429FollowupPending = true
-		}
+	// Grok OAuth 429 is almost always account-scoped free/subscription exhaustion
+	// (subscription:free-usage-exhausted). Keep switching accounts until the
+	// handler exhausts maxAccountSwitches / no-available-account; do not collapse
+	// the whole request to the first account's 429 after a single follow-up.
+	if isGrokOAuthAccount(account) || (account != nil && account.Platform == PlatformGrok) {
 		return false
 	}
 	if statusCode != http.StatusTooManyRequests || !isOpenAIOAuthAccount(account) {
 		return false
 	}
+	_ = state
 	return s.isOpenAIOAuth429Storm()
 }

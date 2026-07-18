@@ -240,6 +240,16 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, openAIWSHTTPBridgeErrorBodyLimitBytes))
 		if account.Platform == PlatformGrok {
 			s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			// Failover statuses must not be written to the client WS stream; the
+			// handler switches accounts via UpstreamFailoverError instead.
+			if s.shouldFailoverUpstreamError(resp.StatusCode) {
+				return nil, &UpstreamFailoverError{
+					StatusCode:             resp.StatusCode,
+					ResponseBody:           respBody,
+					ResponseHeaders:        resp.Header.Clone(),
+					RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+				}
+			}
 		} else if shouldCooldownOpenAITransientUpstreamError(resp.StatusCode, respBody) {
 			canonicalModel := canonicalOpenAIAccountSchedulingModel(account, originalModel)
 			s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, canonicalModel)

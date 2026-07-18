@@ -165,16 +165,21 @@ func (s *GrokQuotaService) probeUsage(ctx context.Context, accountID int64) (*Gr
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	now := time.Now()
+	// Read a small error body so free-usage-exhausted probes can enter 24h
+	// rate_limited; already-limited accounts are not refreshed.
+	probeBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	snapshot := xai.ObserveQuotaHeaders(resp.Header, resp.StatusCode, "active_probe")
-	resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, time.Now())
+	markGrokFreeUsageExhaustedSnapshot(snapshot, probeBody, now)
+	resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, now)
 	if limited {
-		normalizeGrokExhaustedWindowResets(snapshot, resetAt, time.Now())
+		normalizeGrokExhaustedWindowResets(snapshot, resetAt, now)
 	}
 	persistErr := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
 		grokQuotaSnapshotExtraKey: snapshot,
 	})
 	if limited {
-		persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
+		persistGrokRateLimitWithSnapshot(ctx, s.accountRepo, account, snapshot, resetAt)
 	} else if isSuccessfulGrokRateLimitRecovery(account, snapshot) {
 		clearGrokRateLimitAfterRecovery(ctx, s.accountRepo, account)
 	}
