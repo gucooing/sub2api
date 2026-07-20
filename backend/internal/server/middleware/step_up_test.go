@@ -31,13 +31,16 @@ func (s stubStepUpUserReader) GetByID(ctx context.Context, id int64) (*service.U
 	return s.user, s.err
 }
 
-type stubStepUpFeatureToggle struct {
+type stubStepUpSettingReader struct {
 	enabled bool
 }
 
-func (s stubStepUpFeatureToggle) IsSensitiveOpsStepUpEnabled(ctx context.Context) bool {
+func (s stubStepUpSettingReader) IsStepUpEnabled(ctx context.Context) bool {
 	return s.enabled
 }
+
+// stepUpEnabled 功能开关开启的设置桩，供既有门控分支测试使用。
+var stepUpEnabled = stubStepUpSettingReader{enabled: true}
 
 func newStepUpTestContext(t *testing.T) (*gin.Context, *httptest.ResponseRecorder) {
 	t.Helper()
@@ -48,25 +51,11 @@ func newStepUpTestContext(t *testing.T) (*gin.Context, *httptest.ResponseRecorde
 	return c, rec
 }
 
-func TestEnforceStepUpDisabledByDefault(t *testing.T) {
-	c, _ := newStepUpTestContext(t)
-	// No subject / no TOTP: still passes when feature is off.
-	ok := enforceStepUp(c, stubStepUpGrantChecker{}, stubStepUpUserReader{}, stubStepUpFeatureToggle{enabled: false})
-	require.True(t, ok)
-	require.False(t, c.IsAborted())
-}
-
-func TestEnforceStepUpNilToggleSkipsGate(t *testing.T) {
-	c, _ := newStepUpTestContext(t)
-	ok := enforceStepUp(c, stubStepUpGrantChecker{}, stubStepUpUserReader{}, nil)
-	require.True(t, ok)
-}
-
 func TestEnforceStepUpRejectsAdminAPIKey(t *testing.T) {
 	c, rec := newStepUpTestContext(t)
 	c.Set("auth_method", service.AuditAuthMethodAdminAPIKey)
 
-	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{TotpEnabled: true}}, stubStepUpFeatureToggle{enabled: true})
+	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{TotpEnabled: true}}, stepUpEnabled)
 
 	require.False(t, ok)
 	require.True(t, c.IsAborted())
@@ -77,7 +66,7 @@ func TestEnforceStepUpRejectsAdminAPIKey(t *testing.T) {
 func TestEnforceStepUpRequiresAuthSubject(t *testing.T) {
 	c, rec := newStepUpTestContext(t)
 
-	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{TotpEnabled: true}}, stubStepUpFeatureToggle{enabled: true})
+	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{TotpEnabled: true}}, stepUpEnabled)
 
 	require.False(t, ok)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -87,7 +76,7 @@ func TestEnforceStepUpRequiresTotpEnabled(t *testing.T) {
 	c, rec := newStepUpTestContext(t)
 	c.Set(string(ContextKeyUser), AuthSubject{UserID: 1})
 
-	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: false}}, stubStepUpFeatureToggle{enabled: true})
+	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: false}}, stepUpEnabled)
 
 	require.False(t, ok)
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -98,7 +87,7 @@ func TestEnforceStepUpFailsClosedOnGrantError(t *testing.T) {
 	c, rec := newStepUpTestContext(t)
 	c.Set(string(ContextKeyUser), AuthSubject{UserID: 1})
 
-	ok := enforceStepUp(c, stubStepUpGrantChecker{err: errors.New("redis down")}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: true}}, stubStepUpFeatureToggle{enabled: true})
+	ok := enforceStepUp(c, stubStepUpGrantChecker{err: errors.New("redis down")}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: true}}, stepUpEnabled)
 
 	require.False(t, ok)
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
@@ -109,7 +98,7 @@ func TestEnforceStepUpRequiresGrant(t *testing.T) {
 	c, rec := newStepUpTestContext(t)
 	c.Set(string(ContextKeyUser), AuthSubject{UserID: 1})
 
-	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: false}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: true}}, stubStepUpFeatureToggle{enabled: true})
+	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: false}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: true}}, stepUpEnabled)
 
 	require.False(t, ok)
 	require.Equal(t, http.StatusForbidden, rec.Code)
@@ -120,8 +109,58 @@ func TestEnforceStepUpPassesWithGrant(t *testing.T) {
 	c, _ := newStepUpTestContext(t)
 	c.Set(string(ContextKeyUser), AuthSubject{UserID: 1})
 
-	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: true}}, stubStepUpFeatureToggle{enabled: true})
+	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: true}}, stepUpEnabled)
 
 	require.True(t, ok)
 	require.False(t, c.IsAborted())
+}
+
+// 功能开关关闭时：不论 TOTP/grant/凭证类型，一律放行（恢复门控引入前行为）。
+func TestEnforceStepUpDisabledSkipsAllChecks(t *testing.T) {
+	disabled := stubStepUpSettingReader{enabled: false}
+
+	t.Run("no totp, no grant", func(t *testing.T) {
+		c, _ := newStepUpTestContext(t)
+		c.Set(string(ContextKeyUser), AuthSubject{UserID: 1})
+
+		ok := enforceStepUp(c, stubStepUpGrantChecker{granted: false}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: false}}, disabled)
+
+		require.True(t, ok)
+		require.False(t, c.IsAborted())
+	})
+
+	t.Run("admin api key", func(t *testing.T) {
+		c, _ := newStepUpTestContext(t)
+		c.Set("auth_method", service.AuditAuthMethodAdminAPIKey)
+
+		ok := enforceStepUp(c, stubStepUpGrantChecker{granted: false}, stubStepUpUserReader{user: nil, err: errors.New("should not be called")}, disabled)
+
+		require.True(t, ok)
+		require.False(t, c.IsAborted())
+	})
+}
+
+// settings 为 nil 时保持门控（fail-closed），避免装配缺陷静默关闭安全控制。
+func TestEnforceStepUpNilSettingsFailsClosed(t *testing.T) {
+	c, rec := newStepUpTestContext(t)
+	c.Set(string(ContextKeyUser), AuthSubject{UserID: 1})
+
+	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: false}, stubStepUpUserReader{user: &service.User{ID: 1, TotpEnabled: true}}, nil)
+
+	require.False(t, ok)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Contains(t, rec.Body.String(), "STEP_UP_REQUIRED")
+}
+
+// EnforceStepUp 收到 nil *service.SettingService 时不得因 typed-nil 装箱绕过门控：
+// 未认证请求仍应被拦截（401），而不是当作"开关关闭"放行。
+func TestEnforceStepUpTypedNilSettingServiceFailsClosed(t *testing.T) {
+	require.Nil(t, stepUpSettingsOrNil(nil))
+
+	c, rec := newStepUpTestContext(t)
+
+	ok := EnforceStepUp(c, nil, nil, nil)
+
+	require.False(t, ok)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }

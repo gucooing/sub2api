@@ -726,7 +726,9 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 		// Admin model test must not be blocked by rate-limit / temp unschedulable
 		// windows; surface the real upstream response (including 429) instead.
 		var err error
-		authToken, err = s.grokTokenProvider.GetAccessTokenForAdmin(ctx, account)
+		// 手动测试不走生产调度资格门：关闭调度、限流/过载/临时冷却中的账号
+		// 也应能被管理员探测（#4598），与 Codex/OpenAI 测试行为一致。
+		authToken, err = s.grokTokenProvider.GetAccessTokenForManualTest(ctx, account)
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to get Grok access token: %s", err.Error()))
 		}

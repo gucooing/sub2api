@@ -33,7 +33,7 @@ type UserHandler struct {
 	billingCache          service.BillingCache                // T17/T18 缓存失效（PUT/POST 路径）
 	totpService           *service.TotpService                // 角色提升为管理员的 step-up 门控
 	userService           *service.UserService
-	settingService        *service.SettingService             // 敏感操作 step-up 开关
+	settingService        *service.SettingService // step-up 功能开关
 }
 
 // NewUserHandler creates a new admin user handler
