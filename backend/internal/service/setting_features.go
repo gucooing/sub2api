@@ -215,13 +215,6 @@ func (s *SettingService) IsStepUpEnabled(ctx context.Context) bool {
 	return value == "true"
 }
 
-// IsSensitiveOpsStepUpEnabled 是 IsStepUpEnabled 的兼容别名。
-// 历史本地 fork 使用 sensitive_ops_step_up_enabled；上游统一为 step_up_enabled。
-// 中间件与写入路径已切到 step_up_enabled，此方法仅作过渡兼容。
-func (s *SettingService) IsSensitiveOpsStepUpEnabled(ctx context.Context) bool {
-	return s.IsStepUpEnabled(ctx)
-}
-
 // defaultAuditLogRetentionDays 审计日志默认保留天数。
 const defaultAuditLogRetentionDays = 180
 
