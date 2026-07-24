@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 17 // v17: key-scoped group unavailability + sticky pin
+const apiKeyAuthSnapshotVersion = 18 // v18: multi-group unavailability/sticky pin + reasoning effort policy
 
 // DefaultKeyGroupUnavailabilityTTL is how long this key skips a group after zero-available.
 const DefaultKeyGroupUnavailabilityTTL = 2 * time.Minute
@@ -375,6 +375,8 @@ func groupToAuthSnapshot(g *Group) *APIKeyAuthGroupSnapshot {
 		MessagesDispatchModelConfig:     g.MessagesDispatchModelConfig,
 		ModelsListConfig:                g.ModelsListConfig,
 		RPMLimit:                        g.RPMLimit,
+		MaxReasoningEffort:              g.MaxReasoningEffort,
+		ReasoningEffortMappings:         g.ReasoningEffortMappings,
 		PeakRateEnabled:                 g.PeakRateEnabled,
 		PeakStart:                       g.PeakStart,
 		PeakEnd:                         g.PeakEnd,
@@ -423,6 +425,8 @@ func authGroupSnapshotToGroup(g *APIKeyAuthGroupSnapshot) *Group {
 		MessagesDispatchModelConfig:     g.MessagesDispatchModelConfig,
 		ModelsListConfig:                g.ModelsListConfig,
 		RPMLimit:                        g.RPMLimit,
+		MaxReasoningEffort:              g.MaxReasoningEffort,
+		ReasoningEffortMappings:         g.ReasoningEffortMappings,
 		PeakRateEnabled:                 g.PeakRateEnabled,
 		PeakStart:                       g.PeakStart,
 		PeakEnd:                         g.PeakEnd,
@@ -503,6 +507,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 	}
 
 	// Prefer preloaded ordered Groups; fall back to primary Group.
+	// groupToAuthSnapshot includes MaxReasoningEffort / ReasoningEffortMappings (upstream).
 	if len(apiKey.Groups) > 0 {
 		snapshot.Groups = make([]APIKeyAuthGroupSnapshot, 0, len(apiKey.Groups))
 		for _, g := range apiKey.Groups {
