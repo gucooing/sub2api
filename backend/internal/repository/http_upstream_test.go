@@ -235,9 +235,9 @@ func TestHTTPUpstreamDoAppliesGrokCLIIdentityBeforeOAuthRoundTrip(t *testing.T) 
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 			require.NoError(t, resp.Body.Close())
 
-			require.Equal(t, "0.2.93", capturedHeaders.Get("x-grok-client-version"))
+			require.Equal(t, "0.2.112", capturedHeaders.Get("x-grok-client-version"))
 			require.Equal(t, "xai-grok-cli", capturedHeaders.Get("X-XAI-Token-Auth"))
-			require.Equal(t, "xai-grok-workspace/0.2.93", capturedHeaders.Get("User-Agent"))
+			require.Equal(t, "xai-grok-workspace/0.2.112", capturedHeaders.Get("User-Agent"))
 		})
 	}
 }
@@ -458,9 +458,9 @@ func TestApplyGrokCLIProxyHeaders(t *testing.T) {
 
 		applyGrokCLIProxyHeaders(req)
 
-		require.Equal(t, "0.2.93", req.Header.Get("x-grok-client-version"))
+		require.Equal(t, "0.2.112", req.Header.Get("x-grok-client-version"))
 		require.Equal(t, "xai-grok-cli", req.Header.Get("X-XAI-Token-Auth"))
-		require.Equal(t, "xai-grok-workspace/0.2.93", req.Header.Get("User-Agent"))
+		require.Equal(t, "xai-grok-workspace/0.2.112", req.Header.Get("User-Agent"))
 	})
 
 	t.Run("accepts a valid operator override", func(t *testing.T) {
@@ -481,7 +481,7 @@ func TestApplyGrokCLIProxyHeaders(t *testing.T) {
 
 		applyGrokCLIProxyHeaders(req)
 
-		require.Equal(t, "0.2.93", req.Header.Get("x-grok-client-version"))
+		require.Equal(t, "0.2.112", req.Header.Get("x-grok-client-version"))
 		require.Empty(t, req.Header.Get("X-Injected"))
 	})
 
@@ -492,19 +492,19 @@ func TestApplyGrokCLIProxyHeaders(t *testing.T) {
 
 		applyGrokCLIProxyHeaders(req)
 
-		require.Equal(t, "0.2.93", req.Header.Get("x-grok-client-version"))
-		require.Equal(t, "xai-grok-workspace/0.2.93", req.Header.Get("User-Agent"))
+		require.Equal(t, "0.2.112", req.Header.Get("x-grok-client-version"))
+		require.Equal(t, "xai-grok-workspace/0.2.112", req.Header.Get("User-Agent"))
 	})
 
 	t.Run("rejects a prerelease override at the minimum version", func(t *testing.T) {
-		t.Setenv("XAI_GROK_CLI_VERSION", "0.2.93-beta.1")
+		t.Setenv("XAI_GROK_CLI_VERSION", "0.2.112-beta.1")
 		req, err := http.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/responses", nil)
 		require.NoError(t, err)
 
 		applyGrokCLIProxyHeaders(req)
 
-		require.Equal(t, "0.2.93", req.Header.Get("x-grok-client-version"))
-		require.Equal(t, "xai-grok-workspace/0.2.93", req.Header.Get("User-Agent"))
+		require.Equal(t, "0.2.112", req.Header.Get("x-grok-client-version"))
+		require.Equal(t, "xai-grok-workspace/0.2.112", req.Header.Get("User-Agent"))
 	})
 
 	for _, version := range []string{
@@ -521,8 +521,8 @@ func TestApplyGrokCLIProxyHeaders(t *testing.T) {
 
 			applyGrokCLIProxyHeaders(req)
 
-			require.Equal(t, "0.2.93", req.Header.Get("x-grok-client-version"))
-			require.Equal(t, "xai-grok-workspace/0.2.93", req.Header.Get("User-Agent"))
+			require.Equal(t, "0.2.112", req.Header.Get("x-grok-client-version"))
+			require.Equal(t, "xai-grok-workspace/0.2.112", req.Header.Get("User-Agent"))
 		})
 	}
 

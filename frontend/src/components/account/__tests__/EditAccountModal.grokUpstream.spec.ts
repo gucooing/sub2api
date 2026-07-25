@@ -206,9 +206,9 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     const account = buildGrokOAuthAccount({
       header_override_enabled: true,
       header_overrides: {
-        'user-agent': 'grok-pager/0.2.93',
+        'user-agent': 'grok-pager/0.2.112',
         'x-grok-client-identifier': 'grok-pager',
-        'x-grok-client-version': '0.2.93',
+        'x-grok-client-version': '0.2.112',
         'x-xai-token-auth': 'xai-grok-cli'
       }
     })
@@ -222,9 +222,9 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     const payload = updateAccountMock.mock.calls[0]?.[1]
     expect(payload?.credentials?.header_override_enabled).toBe(true)
     expect(payload?.credentials?.header_overrides).toEqual({
-      'user-agent': 'grok-pager/0.2.93',
+      'user-agent': 'grok-pager/0.2.112',
       'x-grok-client-identifier': 'grok-pager',
-      'x-grok-client-version': '0.2.93',
+      'x-grok-client-version': '0.2.112',
       'x-xai-token-auth': 'xai-grok-cli'
     })
   })

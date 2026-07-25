@@ -189,6 +189,35 @@ func TestPatchGrokResponsesBodyFlattensNamespaceTools(t *testing.T) {
 	require.False(t, gjson.GetBytes(patched, "tool_choice.namespace").Exists())
 }
 
+func TestPatchGrokResponsesBodyUsesNativeSearchForReservedFunctionNames(t *testing.T) {
+	t.Parallel()
+
+	// Regression for the local fix lost during upstream sync (381a97ed3):
+	// function tools named web_search/x_search must become native built-in
+	// tools, otherwise xAI only emits client function_calls and search never runs.
+	body := []byte(`{
+		"model":"grok",
+		"input":"search",
+		"tools":[
+			{"type":"function","name":"web_search","parameters":{"type":"object"}},
+			{"type":"function","name":"lookup","parameters":{"type":"object"}},
+			{"type":"web_search"}
+		],
+		"tool_choice":{"type":"function","name":"web_search"}
+	}`)
+	patched, err := patchGrokResponsesBody(body, "grok-4.5")
+	require.NoError(t, err)
+
+	tools := gjson.GetBytes(patched, "tools").Array()
+	require.Len(t, tools, 2)
+	require.Equal(t, "web_search", tools[0].Get("type").String())
+	require.False(t, tools[0].Get("name").Exists())
+	require.Equal(t, "lookup", grokResponsesToolEffectiveName(tools[1]))
+	// Forced function choice points at a tool that was promoted to native;
+	// drop it rather than forward a dangling function selection.
+	require.False(t, gjson.GetBytes(patched, "tool_choice").Exists())
+}
+
 func TestPatchGrokResponsesBodyDropsToolChoiceWhenNoSupportedToolsRemain(t *testing.T) {
 	t.Parallel()
 

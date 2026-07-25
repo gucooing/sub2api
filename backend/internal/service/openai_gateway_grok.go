@@ -23,7 +23,7 @@ const (
 	grokComposerImageBridgeVisionModel     = "grok-build-0.1"
 	grokComposerImageBridgeMaxOutputTokens = 512
 	grokUpstreamUserAgent                  = "sub2api-grok/1.0"
-	grokCLIVersion                         = "0.2.93"
+	grokCLIVersion                         = "0.2.112"
 	grokDefaultResponsesModel              = "grok-4.5"
 	// Short RPM/TPM style 429s with no authoritative reset still need a brief
 	// local pause so the scheduler does not immediately reselect the same account.
@@ -675,15 +675,36 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 
 	rawTools := tools.Array()
 	filteredTools := make([]json.RawMessage, 0, len(rawTools))
+	seenNames := make(map[string]struct{}, len(rawTools))
+	toolsChanged := false
 	for _, tool := range rawTools {
 		toolType := strings.TrimSpace(tool.Get("type").String())
-		if _, ok := grokResponsesSupportedToolTypes[toolType]; ok {
-			filteredTools = append(filteredTools, json.RawMessage(tool.Raw))
+		if _, ok := grokResponsesSupportedToolTypes[toolType]; !ok {
+			toolsChanged = true
+			continue
 		}
+		// Clients (Grok Build, Claude Desktop bridges, etc.) often declare
+		// xAI built-in search as ordinary function tools. Promote those
+		// reserved names to native server tools so the upstream actually
+		// executes them instead of emitting a client-side function_call.
+		effectiveName := grokResponsesToolEffectiveName(tool)
+		rawTool := json.RawMessage(tool.Raw)
+		if toolType == "function" && isGrokNativeSearchToolName(effectiveName) {
+			rawTool = json.RawMessage(`{"type":"` + effectiveName + `"}`)
+			toolsChanged = true
+		}
+		if effectiveName != "" {
+			if _, duplicate := seenNames[effectiveName]; duplicate {
+				toolsChanged = true
+				continue
+			}
+			seenNames[effectiveName] = struct{}{}
+		}
+		filteredTools = append(filteredTools, rawTool)
 	}
 
 	var err error
-	if len(filteredTools) != len(rawTools) {
+	if toolsChanged || len(filteredTools) != len(rawTools) {
 		if len(filteredTools) == 0 {
 			body, err = sjson.DeleteBytes(body, "tools")
 		} else {
@@ -710,6 +731,32 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 		}
 	}
 	return body, nil
+}
+
+// isGrokNativeSearchToolName reports whether name is an xAI built-in search
+// tool that must be sent as {"type":"..."} rather than a function declaration.
+func isGrokNativeSearchToolName(name string) bool {
+	return name == "web_search" || name == "x_search"
+}
+
+// grokResponsesToolEffectiveName returns the stable identity used for tool
+// dedup and reserved-name promotion. Native search tools use their type;
+// function tools use top-level or nested name.
+func grokResponsesToolEffectiveName(tool gjson.Result) string {
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	if name != "" {
+		return name
+	}
+	switch toolType {
+	case "web_search", "x_search":
+		return toolType
+	default:
+		return ""
+	}
 }
 
 func shouldDropGrokToolChoice(toolChoice gjson.Result, tools []json.RawMessage) bool {
