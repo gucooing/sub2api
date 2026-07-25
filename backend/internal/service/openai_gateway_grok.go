@@ -669,7 +669,13 @@ var grokResponsesSupportedToolTypes = map[string]struct{}{
 
 func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
+	if !tools.Exists() {
+		if gjson.GetBytes(body, "tool_choice").Exists() {
+			return sjson.DeleteBytes(body, "tool_choice")
+		}
+		return body, nil
+	}
+	if !tools.IsArray() {
 		return body, nil
 	}
 
@@ -1574,7 +1580,7 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 		if snapshot != nil {
 			s.updateGrokUsageSnapshot(ctx, account, snapshot)
 		}
-		if statusCode >= 500 {
+		if statusCode >= 500 && !account.IsPoolMode() {
 			s.tempUnscheduleGrok(ctx, account, 2*time.Minute, "grok upstream temporary error")
 		}
 	}
