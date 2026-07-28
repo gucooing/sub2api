@@ -813,6 +813,25 @@ func TestGrokFreeMessagesFunctionToolCacheRouteRequiresKnownFreeTier(t *testing.
 			wantMix: true,
 		},
 		{
+			// Real Free OAuth probes often succeed weekly (empty plan, no
+			// credit bar) while monthly returns an empty body → Partial.
+			// That must still inject native search so Free stays cacheable.
+			name: "free weekly-only partial blank plan",
+			account: func() *Account {
+				a := healthyGrokOAuthGatewayTestAccount(9114, "access-token")
+				a.Extra = map[string]any{grokBillingExtraKey: map[string]any{
+					"status_code":       http.StatusOK,
+					"source":            "billing_probe",
+					"period_type":       "weekly",
+					"weekly_updated_at": "2026-07-15T05:00:00Z",
+					"partial":           true,
+					"failed_windows":    []string{"monthly"},
+				}}
+				return a
+			}(),
+			wantMix: true,
+		},
+		{
 			name: "free rolling token quota",
 			account: func() *Account {
 				a := healthyGrokOAuthGatewayTestAccount(9112, "access-token")
@@ -859,14 +878,31 @@ func TestGrokFreeMessagesFunctionToolCacheRouteRequiresKnownFreeTier(t *testing.
 			}(),
 		},
 		{
-			name: "partial billing without monthly evidence remains unknown",
+			// Dual-window failure leaves no Weekly/MonthlyUpdatedAt — still
+			// fail-closed so unobserved accounts do not get Free injection.
+			name: "dual-window billing failure remains unknown",
 			account: func() *Account {
 				a := healthyGrokOAuthGatewayTestAccount(9122, "access-token")
 				a.Extra = map[string]any{grokBillingExtraKey: map[string]any{
-					"status_code":    http.StatusOK,
+					"status_code":    http.StatusBadGateway,
 					"source":         "billing_probe",
 					"partial":        true,
-					"failed_windows": []string{"monthly"},
+					"failed_windows": []string{"weekly", "monthly"},
+				}}
+				return a
+			}(),
+		},
+		{
+			name: "weekly credit bar is paid evidence",
+			account: func() *Account {
+				a := healthyGrokOAuthGatewayTestAccount(9123, "access-token")
+				a.Extra = map[string]any{grokBillingExtraKey: map[string]any{
+					"status_code":        http.StatusOK,
+					"source":             "billing_probe",
+					"period_type":        "weekly",
+					"usage_percent":      12.0,
+					"weekly_updated_at":  "2026-07-15T05:00:00Z",
+					"monthly_updated_at": "2026-07-15T05:00:00Z",
 				}}
 				return a
 			}(),

@@ -313,17 +313,20 @@ func isKnownGrokFreeAccount(account *Account) bool {
 				paidSignal = true
 			}
 		}
+		// Paid subscriptions expose a SuperGrok plan, monthly dollar limit, and/or
+		// the weekly creditUsagePercent bar. Free OAuth deliberately omits those
+		// fields (empty plan, no monthly limit, no weekly credit bar).
 		if billing.UsagePercent != nil || billing.UsedPercent != nil ||
 			(billing.MonthlyLimitCents != nil && *billing.MonthlyLimitCents > 0) {
 			paidSignal = true
 		}
-		// xAI deliberately reports an empty plan for Free accounts; only paid
-		// subscriptions receive a SuperGrok plan/monthly limit. A successful
-		// monthly billing observation with no paid signal is therefore positive
-		// Free evidence, not an unknown tier. Keep partial probes fail-closed.
-		if strings.TrimSpace(billing.MonthlyUpdatedAt) != "" ||
-			(billing.StatusCode >= http.StatusOK && billing.StatusCode < http.StatusMultipleChoices &&
-				!billing.Partial && len(billing.FailedWindows) == 0) {
+		// xAI reports an empty plan for Free accounts. Any successful billing
+		// window without paid markers is positive Free evidence — including the
+		// common weekly-only partial probe where monthly returns an empty body
+		// and BuildBillingSummary is nil. Pure dual-window failures stay
+		// fail-closed so unobserved accounts do not opt into Free tool injection.
+		if !paidSignal && strings.TrimSpace(billing.Plan) == "" &&
+			grokBillingHasSuccessfulObservation(billing) {
 			inferredFreeSignal = true
 		}
 	}
@@ -351,6 +354,21 @@ func isKnownGrokFreeAccount(account *Account) bool {
 	// protects upgraded/stale accounts whose previous quota snapshot still
 	// carries the historical 2M Free token limit.
 	return !paidSignal && (freeSignal || inferredFreeSignal)
+}
+
+// grokBillingHasSuccessfulObservation reports whether billing extra contains at
+// least one successfully refreshed window (or a fully successful dual probe).
+// Dual-window transport/auth failures leave no Weekly/MonthlyUpdatedAt and must
+// not be treated as Free evidence.
+func grokBillingHasSuccessfulObservation(billing *xai.BillingSummary) bool {
+	if billing == nil {
+		return false
+	}
+	if strings.TrimSpace(billing.WeeklyUpdatedAt) != "" || strings.TrimSpace(billing.MonthlyUpdatedAt) != "" {
+		return true
+	}
+	return billing.StatusCode >= http.StatusOK && billing.StatusCode < http.StatusMultipleChoices &&
+		!billing.Partial && len(billing.FailedWindows) == 0
 }
 
 func isGrokFreeSubscriptionTier(tier string) bool {
