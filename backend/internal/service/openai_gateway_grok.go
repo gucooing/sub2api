@@ -80,15 +80,20 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 	// Codex Responses Lite additional_tools part of the stable tool prefix.
 	cacheIdentity := resolveGrokCacheIdentity(c, patchedBody, "", upstreamModel)
 	mixedCacheIntentBody := append([]byte(nil), patchedBody...)
-	patchedBody, err = applyGrokResponsesCacheIdentity(patchedBody, body, cacheIdentity, account.IsGrokOAuth())
+	// /responses/compact rejects tool_choice; keep Free native-tool injection off
+	// that path even when no cache identity is available.
+	injectFreeTierTools := account.IsGrokOAuth() && !isOpenAIResponsesCompactPath(c)
+	patchedBody, err = applyGrokResponsesCacheIdentity(patchedBody, body, cacheIdentity, injectFreeTierTools)
 	if err != nil {
 		return nil, fmt.Errorf("apply grok prompt cache identity: %w", err)
 	}
 	// Free OAuth + client function tools: reuse Messages mixed-tools cache route
 	// (append web_search/x_search so xAI does not force non-cacheable build-free).
-	patchedBody, err = applyGrokFreeRequestToolCacheRoute(c, patchedBody, mixedCacheIntentBody, account, cacheIdentity)
-	if err != nil {
-		return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", err)
+	if injectFreeTierTools {
+		patchedBody, err = applyGrokFreeRequestToolCacheRoute(c, patchedBody, mixedCacheIntentBody, account, cacheIdentity)
+		if err != nil {
+			return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", err)
+		}
 	}
 
 	token, _, err := s.getRequestCredential(ctx, c, account)

@@ -142,33 +142,40 @@ func isGrokRequestContext(c *gin.Context) bool {
 // xAI Responses request. Existing client values are deliberately replaced by
 // the tenant-isolated value to prevent collisions on shared OAuth accounts.
 //
-// Free OAuth requests without native search tools are routed by xAI to the
-// non-cacheable build-free model. For otherwise tool-free requests, add the
-// native tools with tool_choice=none: this selects the cache-capable tier
-// without allowing an actual search. Explicit client function tools are handled by
-// applyGrokFreeMessagesFunctionToolCacheRoute (Messages bridge and native Responses).
+// For OAuth tool-free requests, inject native web_search/x_search with
+// tool_choice=none so xAI selects the cache-capable route without running a
+// search. Explicit client tool intent (including tools later stripped by the
+// sanitizer) is left alone here; Free accounts with client tools are handled by
+// applyGrokFree* which always ensures missing web_search/x_search.
+//
+// Native-tool injection on the tool-free path is independent of cache identity:
+// missing a session seed must not strand Free/OAuth on build-free.
 func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity string, injectFreeTierTools bool) ([]byte, error) {
 	identity = strings.TrimSpace(identity)
+	out := body
+	var err error
 	if identity == "" {
 		if gjson.GetBytes(body, "prompt_cache_key").Exists() {
-			return sjson.DeleteBytes(body, "prompt_cache_key")
+			out, err = sjson.DeleteBytes(body, "prompt_cache_key")
+			if err != nil {
+				return nil, err
+			}
 		}
-		return body, nil
-	}
-	out, err := sjson.SetBytes(body, "prompt_cache_key", identity)
-	if err != nil {
-		return nil, err
+	} else {
+		out, err = sjson.SetBytes(body, "prompt_cache_key", identity)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !injectFreeTierTools {
 		return out, nil
 	}
-	// Inspect the pre-sanitization source. patchGrokResponsesBody may remove an
-	// unsupported client tool and its tool_choice; that must not turn an
-	// explicit client tool intent into an eligible native-tool request.
+	// Pre-sanitization intent wins: stripped unsupported tools must not be
+	// rewritten into an eligible tool-free native-search request here.
 	if hasGrokResponsesToolIntent(intentSourceBody) {
 		return out, nil
 	}
-	out, err = sjson.SetRawBytes(out, "tools", []byte(grokFreeCacheNativeToolsJSON))
+	out, err = ensureGrokNativeSearchTools(out)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +183,14 @@ func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity str
 }
 
 func hasGrokResponsesToolIntent(body []byte) bool {
-	if gjson.GetBytes(body, "tools").Exists() || gjson.GetBytes(body, "tool_choice").Exists() {
+	// Empty/null tools arrays are not real tool intent — Free/OAuth still needs
+	// native search injection on those requests. Only a non-empty tools list or
+	// an explicit tool_choice counts.
+	tools := gjson.GetBytes(body, "tools")
+	if tools.IsArray() && len(tools.Array()) > 0 {
+		return true
+	}
+	if gjson.GetBytes(body, "tool_choice").Exists() {
 		return true
 	}
 	input := gjson.GetBytes(body, "input")
@@ -187,54 +201,50 @@ func hasGrokResponsesToolIntent(body []byte) bool {
 		if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
 			continue
 		}
-		tools := item.Get("tools")
-		if !tools.Exists() || !tools.IsArray() || len(tools.Array()) > 0 {
+		carrierTools := item.Get("tools")
+		if !carrierTools.Exists() || !carrierTools.IsArray() || len(carrierTools.Array()) > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-// applyGrokFreeMessagesFunctionToolCacheRoute enables xAI's cache-capable
-// mixed-tools route only for known Free accounts. Pure client tools default to
-// the cache-capable route so an intermediate sub2api does not need to preserve
-// client-specific opt-in headers. Operators can explicitly disable this per
-// account when native search tools would change the desired behavior (#4486).
+// applyGrokFreeMessagesFunctionToolCacheRoute ensures Free OAuth requests carry
+// native web_search/x_search whenever those tools are missing. Operators can
+// explicitly disable injection per account (#4486).
 func applyGrokFreeMessagesFunctionToolCacheRoute(body, intentSourceBody []byte, account *Account, cacheIdentity string) ([]byte, error) {
-	allowPureClientTools, _ := grokClientToolCacheAccountPolicy(account)
-	return applyGrokFreeToolCacheRoute(body, intentSourceBody, account, cacheIdentity, allowPureClientTools, true)
+	return applyGrokFreeToolCacheRoute(body, intentSourceBody, account, cacheIdentity)
 }
 
-// applyGrokFreeRequestToolCacheRoute also accepts a request-scoped opt-in. The
-// sub2api header is consumed locally because buildGrokResponsesRequest only
-// forwards the explicitly supported OpenAI-Beta header from downstream.
+// applyGrokFreeRequestToolCacheRoute also accepts a request-scoped override via
+// X-Sub2API-Grok-Client-Tool-Cache. The header is consumed locally because
+// buildGrokResponsesRequest only forwards the supported OpenAI-Beta header.
+// Explicit request opt-out always wins; request opt-in may override an account
+// opt-out for a known Free account.
 func applyGrokFreeRequestToolCacheRoute(c *gin.Context, body, intentSourceBody []byte, account *Account, cacheIdentity string) ([]byte, error) {
-	allowPureClientTools, accountPolicyExplicit := grokClientToolCacheAccountPolicy(account)
-	requestOptOut := false
+	enabled, _ := grokClientToolCacheAccountPolicy(account)
 	if c != nil {
 		switch strings.ToLower(strings.TrimSpace(c.GetHeader(grokClientToolCacheOptInHeader))) {
 		case "1", "true", "yes", "on", "prefer-cache":
-			allowPureClientTools = true
+			// Request opt-in only makes sense for Free OAuth; paid stays fail-closed.
+			if isKnownGrokFreeAccount(account) {
+				enabled = true
+			}
 		case "0", "false", "no", "off":
-			allowPureClientTools = false
-			requestOptOut = true
+			return body, nil
 		}
 	}
-	if !allowPureClientTools && !accountPolicyExplicit && !requestOptOut && isGrokClaudeDesktopResponsesCacheRequest(c) {
-		allowPureClientTools = true
+	if !enabled {
+		return body, nil
 	}
-	// A function merely named web_search/x_search is still a client function.
-	// Known Free OAuth accounts use the cache route by default; a request-scoped
-	// opt-in may override an account opt-out, while an explicit request opt-out
-	// always wins. The legacy Claude fingerprint remains only as a compatibility
-	// fallback when no account policy has been recorded (#4486).
-	return applyGrokFreeToolCacheRoute(body, intentSourceBody, account, cacheIdentity, allowPureClientTools, allowPureClientTools)
+	_ = cacheIdentity
+	_ = intentSourceBody
+	return ensureGrokNativeSearchTools(body)
 }
 
-// grokClientToolCacheAccountPolicy is intentionally strict for configured
-// values: only a JSON boolean is accepted. A missing key defaults on solely for
-// accounts positively identified as Grok Free OAuth; paid, API-key, and unknown
-// accounts remain fail-closed.
+// grokClientToolCacheAccountPolicy reports whether Free native-tool injection is
+// enabled for the account. Missing key defaults on for known Free OAuth; an
+// explicit false disables injection. Paid/API-key/unknown remain disabled.
 func grokClientToolCacheAccountPolicy(account *Account) (enabled, explicit bool) {
 	if !isKnownGrokFreeAccount(account) {
 		return false, false
@@ -253,49 +263,17 @@ func grokClientToolCacheAccountPolicy(account *Account) (enabled, explicit bool)
 	return enabled, true
 }
 
-// isGrokClaudeDesktopResponsesCacheRequest recognizes the strict wire
-// fingerprint emitted when Claude Desktop's local agent is translated by
-// CC Switch into an OpenAI Responses request. Requiring every independent
-// signal prevents a generic Claude-compatible client (or the Chat bridge)
-// from silently opting into the mixed native/client tool route.
-func isGrokClaudeDesktopResponsesCacheRequest(c *gin.Context) bool {
-	if c == nil || c.Request == nil || c.Request.URL == nil || isOpenAIResponsesCompactPath(c) {
-		return false
-	}
-	path := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
-	if !strings.HasSuffix(path, "/responses") {
-		return false
-	}
-
-	if !claudeCodeUAPattern.MatchString(strings.TrimSpace(c.GetHeader("User-Agent"))) {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(c.GetHeader("X-App"))) {
-	case "cli", "cli-bg":
-	default:
-		return false
-	}
-	if !strings.EqualFold(strings.TrimSpace(c.GetHeader("anthropic-client-platform")), "desktop_app") {
-		return false
-	}
-	return strings.TrimSpace(c.GetHeader("X-Claude-Code-Session-Id")) != ""
-}
-
-func applyGrokFreeToolCacheRoute(body, intentSourceBody []byte, account *Account, cacheIdentity string, allowPureClientTools, allowFunctionSearch bool) ([]byte, error) {
-	if strings.TrimSpace(cacheIdentity) == "" || !isKnownGrokFreeAccount(account) {
+func applyGrokFreeToolCacheRoute(body, intentSourceBody []byte, account *Account, cacheIdentity string) ([]byte, error) {
+	// cacheIdentity is retained for call-site compatibility only. Free native
+	// tool injection keys off account Free evidence and whether web_search /
+	// x_search are missing — not session seeds or companion client tools.
+	_ = cacheIdentity
+	_ = intentSourceBody
+	enabled, _ := grokClientToolCacheAccountPolicy(account)
+	if !enabled {
 		return body, nil
 	}
-	intentTools := gjson.GetBytes(intentSourceBody, "tools")
-	intentToolChoice := gjson.GetBytes(intentSourceBody, "tool_choice")
-	if !isGrokFreeCacheFunctionToolIntent(intentTools, intentToolChoice) {
-		return body, nil
-	}
-	if intentToolChoice.Type == gjson.String && strings.TrimSpace(intentToolChoice.String()) == grokFreeCacheDisabledToolChoice {
-		// Adding native cache-routing tools cannot change behavior when the
-		// client has explicitly disabled all tool execution.
-		return appendGrokFreeCacheNativeToolsWithPolicy(body, true, false)
-	}
-	return appendGrokFreeCacheNativeToolsWithPolicy(body, allowPureClientTools, allowFunctionSearch)
+	return ensureGrokNativeSearchTools(body)
 }
 
 func isKnownGrokFreeAccount(account *Account) bool {
@@ -389,86 +367,29 @@ func isGrokUnknownSubscriptionTier(tier string) bool {
 	}
 }
 
-func isGrokFreeCacheFunctionToolIntent(tools, toolChoice gjson.Result) bool {
-	if !tools.IsArray() {
-		return false
-	}
-	items := tools.Array()
-	if len(items) == 0 {
-		return false
-	}
-	for _, tool := range items {
-		if !tool.IsObject() {
-			return false
-		}
-		toolType := strings.TrimSpace(tool.Get("type").String())
-		if _, ok := grokResponsesSupportedToolTypes[toolType]; !ok {
-			return false
-		}
-		if toolType == "function" {
-			// Responses function declarations keep name at the top level. Reject
-			// Chat Completions' nested function shape and incomplete declarations.
-			if strings.TrimSpace(tool.Get("name").String()) == "" || tool.Get("function").Exists() {
-				return false
-			}
-		}
-	}
-	if !toolChoice.Exists() {
-		return true
-	}
-	if toolChoice.Type != gjson.String {
-		return false
-	}
-	switch strings.TrimSpace(toolChoice.String()) {
-	case "auto", grokFreeCacheDisabledToolChoice:
-		return true
-	default:
-		return false
-	}
-}
-
-func appendMissingGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
-	return appendGrokFreeCacheNativeTools(body, false)
-}
-
-func appendGrokFreeCacheNativeTools(body []byte, allowPureClientTools bool) ([]byte, error) {
-	return appendGrokFreeCacheNativeToolsWithPolicy(body, allowPureClientTools, true)
-}
-
-func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools, allowFunctionSearch bool) ([]byte, error) {
+// ensureGrokNativeSearchTools makes sure web_search and x_search are present as
+// native built-in tools. Missing entries are appended; function-declared search
+// tools are promoted to native. Client tools other than search are preserved.
+// An empty or absent tools array becomes just the two native search tools.
+func ensureGrokNativeSearchTools(body []byte) ([]byte, error) {
 	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
-		return body, nil
+	if !tools.Exists() || !tools.IsArray() || len(tools.Array()) == 0 {
+		return sjson.SetRawBytes(body, "tools", []byte(grokFreeCacheNativeToolsJSON))
 	}
 
 	items := tools.Array()
-	if len(items) == 0 {
-		return body, nil
-	}
-	hasNativeSearch := false
-	for _, tool := range items {
-		switch strings.TrimSpace(tool.Get("type").String()) {
-		case "web_search", "x_search":
-			hasNativeSearch = true
-		}
-	}
-	if !allowPureClientTools && !allowFunctionSearch && !hasNativeSearch {
-		return body, nil
-	}
 	merged := make([]json.RawMessage, 0, len(items)+2)
 	present := make(map[string]bool, 2)
-	hasCompanionTool := false
 	for _, tool := range items {
 		toolType := strings.TrimSpace(tool.Get("type").String())
 		switch toolType {
 		case "function":
 			name := strings.TrimSpace(tool.Get("name").String())
-			if !tool.IsObject() || name == "" || tool.Get("function").Exists() {
-				return body, nil
+			if name == "" {
+				name = strings.TrimSpace(tool.Get("function.name").String())
 			}
-			// Grok Build may declare search as function tools. Convert to native
-			// entries so Free OAuth stays cache-capable without duplicate names.
-			if (name == "web_search" || name == "x_search") && allowFunctionSearch {
+			// Promote client-declared search function tools to native built-ins.
+			if name == "web_search" || name == "x_search" {
 				if present[name] {
 					continue
 				}
@@ -478,17 +399,8 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 				}
 				merged = append(merged, raw)
 				present[name] = true
-				if allowPureClientTools {
-					hasCompanionTool = true
-				}
 				continue
 			}
-			if name == "web_search" || name == "x_search" {
-				// Keep the client function intact and avoid adding a same-named
-				// native tool unless conversion was explicitly enabled.
-				present[name] = true
-			}
-			hasCompanionTool = true
 			merged = append(merged, json.RawMessage(tool.Raw))
 		case "web_search", "x_search":
 			if present[toolType] {
@@ -497,22 +409,8 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 			merged = append(merged, json.RawMessage(tool.Raw))
 			present[toolType] = true
 		default:
-			if _, ok := grokResponsesSupportedToolTypes[toolType]; !ok {
-				return body, nil
-			}
-			hasCompanionTool = true
 			merged = append(merged, json.RawMessage(tool.Raw))
 		}
-	}
-	if !hasCompanionTool {
-		return body, nil
-	}
-	// Only complement missing native search tools when the request already contains
-	// at least one search tool (native or function-form). Pure client function tools
-	// (e.g. view_image) must not trigger injection to avoid biasing model tool
-	// selection (#4486).
-	if !allowPureClientTools && !present["web_search"] && !present["x_search"] {
-		return body, nil
 	}
 	for _, toolType := range []string{"web_search", "x_search"} {
 		if present[toolType] {
@@ -530,6 +428,11 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 	}
 	return sjson.SetRawBytes(body, "tools", encoded)
 }
+
+func appendMissingGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
+	return ensureGrokNativeSearchTools(body)
+}
+
 
 // applyGrokCacheHeaders applies the documented Chat Completions conversation
 // routing header. The request is built from a fresh header map, so client
