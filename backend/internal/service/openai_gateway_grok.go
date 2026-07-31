@@ -31,11 +31,11 @@ const (
 	// Free-tier allowance exhaustion (subscription:free-usage-exhausted) resets over a
 	// rolling 24-hour window. Mark as durable rate_limited (限流中) for that full
 	// window so the account does not re-enter the pool after the short RPM pause.
-	grokFreeUsageExhaustedCooldown = 24 * time.Hour
-	grokRateLimitRepeatCooldown       = 10 * time.Minute
-	grokRateLimitSustainedCooldown    = 30 * time.Minute
-	grokRateLimitMaxAdaptiveCooldown  = time.Hour
-	grokRateLimitBackoffQuietPeriod   = time.Hour
+	grokFreeUsageExhaustedCooldown   = 24 * time.Hour
+	grokRateLimitRepeatCooldown      = 10 * time.Minute
+	grokRateLimitSustainedCooldown   = 30 * time.Minute
+	grokRateLimitMaxAdaptiveCooldown = time.Hour
+	grokRateLimitBackoffQuietPeriod  = time.Hour
 )
 
 func (s *OpenAIGatewayService) forwardGrokResponses(
@@ -190,11 +190,12 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 	var firstTokenMs *int
 	responseID := ""
 	if reqStream {
+		maxLineSize := defaultMaxLineSize
+		if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
+			maxLineSize = s.cfg.Gateway.MaxLineSize
+		}
+		resp.Body = newGrokResponsesBillingPingFilterBody(resp.Body, account, maxLineSize)
 		if hasGrokResponsesClientToolMapping(clientToolMapping) {
-			maxLineSize := defaultMaxLineSize
-			if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-				maxLineSize = s.cfg.Gateway.MaxLineSize
-			}
 			resp.Body = newGrokResponsesClientToolStreamBody(resp.Body, clientToolMapping, maxLineSize)
 		}
 		streamResult, err := s.handleStreamingResponse(ctx, resp, c, account, startTime, originalModel, upstreamModel)
@@ -1187,13 +1188,12 @@ func (s *OpenAIGatewayService) updateGrokUsageSnapshot(ctx context.Context, acco
 			grokQuotaSnapshotExtraKey: snapshot,
 		})
 	}
-	// Error responses are reconciled by handleGrokAccountUpstreamError, which
-	// also installs the immediate in-memory scheduling block. Successful
-	// responses can still consume the last available request/token, so persist
-	// that exhausted window here as a real rate limit rather than relying only
-	// on the passive snapshot scheduler check.
-	// Free-usage 24h pauses and active countdowns are not refreshed from probes.
-	if hasActiveLimit {
+	// Error responses are reconciled by handleGrokAccountUpstreamError. Pool-mode
+	// API keys retain the snapshot for observability but leave account health to
+	// the upstream pool. Other accounts install the immediate runtime and durable
+	// rate-limit state when the observed window is exhausted. Snapshot-aware
+	// persistence keeps active Free-usage countdowns from being refreshed.
+	if hasActiveLimit && !account.IsPoolMode() {
 		s.rateLimitGrokWithSnapshot(stateCtx, account, snapshot, resetAt)
 	} else if recovery {
 		clearGrokRateLimitAfterRecovery(stateCtx, s.accountRepo, account)
@@ -1541,6 +1541,21 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 	// keeps header-driven rate limits or short temp-unschedulable cooldowns.
 	markGrokFreeUsageExhaustedSnapshot(snapshot, responseBody, now)
 
+	// Explicit per-account 403 rules still apply in pool mode. Otherwise pool
+	// accounts retain quota snapshots for observability without local health state.
+	if statusCode == http.StatusForbidden {
+		s.updateGrokUsageSnapshot(ctx, account, snapshot)
+		if s.applyGrokForbiddenPolicy(ctx, account, responseBody) {
+			return
+		}
+	}
+	if account.IsPoolMode() {
+		if statusCode != http.StatusForbidden {
+			s.updateGrokUsageSnapshot(ctx, account, snapshot)
+		}
+		slog.Info("grok_pool_mode_error_state_skipped", "account_id", account.ID, "status_code", statusCode)
+		return
+	}
 	switch statusCode {
 	case http.StatusUnauthorized:
 		s.updateGrokUsageSnapshot(ctx, account, snapshot)
@@ -1548,12 +1563,6 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 	case http.StatusPaymentRequired:
 		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok payment required")
 	case http.StatusForbidden:
-		// Persist free-usage / quota headers when present, then honor account-level
-		// temp-unschedulable rules (upstream) before falling back to a fixed cooldown.
-		s.updateGrokUsageSnapshot(ctx, account, snapshot)
-		if s.applyGrokForbiddenPolicy(ctx, account, responseBody) {
-			return
-		}
 		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok access or entitlement denied")
 	case http.StatusTooManyRequests:
 		if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
@@ -1585,7 +1594,7 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 		if snapshot != nil {
 			s.updateGrokUsageSnapshot(ctx, account, snapshot)
 		}
-		if statusCode >= 500 && !account.IsPoolMode() {
+		if statusCode >= 500 {
 			s.tempUnscheduleGrok(ctx, account, 2*time.Minute, "grok upstream temporary error")
 		}
 	}
