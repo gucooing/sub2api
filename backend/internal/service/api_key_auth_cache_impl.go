@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 19 // v19: multi-group unavailability/sticky pin + AllowLive + reasoning effort
+const apiKeyAuthSnapshotVersion = 20 // v20: multi-group unavailability/sticky pin + AllowLive + reasoning effort + group profit control fields (force refresh of v19 snapshots without profit fields)
 
 // DefaultKeyGroupUnavailabilityTTL is how long this key skips a group after zero-available.
 const DefaultKeyGroupUnavailabilityTTL = 2 * time.Minute
@@ -334,12 +334,12 @@ func (s *APIKeyService) applyAuthCacheEntry(key string, entry *APIKeyAuthCacheEn
 	return s.snapshotToAPIKey(key, entry.Snapshot), true, nil
 }
 
-
 func groupToAuthSnapshot(g *Group) *APIKeyAuthGroupSnapshot {
 	if g == nil {
 		return nil
 	}
 	return &APIKeyAuthGroupSnapshot{
+		// 分组利润控制字段必须随快照缓存（见 APIKeyAuthGroupSnapshot 注释）。
 		ID:                              g.ID,
 		Name:                            g.Name,
 		Platform:                        g.Platform,
@@ -382,6 +382,9 @@ func groupToAuthSnapshot(g *Group) *APIKeyAuthGroupSnapshot {
 		PeakStart:                       g.PeakStart,
 		PeakEnd:                         g.PeakEnd,
 		PeakRateMultiplier:              g.PeakRateMultiplier,
+		ProfitControlEnabled:            g.ProfitControlEnabled,
+		ProfitMinMargin:                 g.ProfitMinMargin,
+		ProfitSafetyBuffer:              g.ProfitSafetyBuffer,
 	}
 }
 
@@ -433,6 +436,9 @@ func authGroupSnapshotToGroup(g *APIKeyAuthGroupSnapshot) *Group {
 		PeakStart:                       g.PeakStart,
 		PeakEnd:                         g.PeakEnd,
 		PeakRateMultiplier:              g.PeakRateMultiplier,
+		ProfitControlEnabled:            g.ProfitControlEnabled,
+		ProfitMinMargin:                 g.ProfitMinMargin,
+		ProfitSafetyBuffer:              g.ProfitSafetyBuffer,
 	}
 }
 
@@ -509,7 +515,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 	}
 
 	// Prefer preloaded ordered Groups; fall back to primary Group.
-	// groupToAuthSnapshot includes AllowLive / MaxReasoningEffort / PeakRate fields.
+	// groupToAuthSnapshot includes AllowLive / MaxReasoningEffort / PeakRate / ProfitControl fields.
 	if len(apiKey.Groups) > 0 {
 		snapshot.Groups = make([]APIKeyAuthGroupSnapshot, 0, len(apiKey.Groups))
 		for _, g := range apiKey.Groups {
