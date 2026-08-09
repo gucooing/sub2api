@@ -23,7 +23,7 @@ const (
 	grokComposerImageBridgeVisionModel     = "grok-build-0.1"
 	grokComposerImageBridgeMaxOutputTokens = 512
 	grokUpstreamUserAgent                  = "sub2api-grok/1.0"
-	grokCLIVersion                         = "0.2.112"
+	grokCLIVersion                         = xai.CLIClientVersion
 	grokDefaultResponsesModel              = "grok-4.5"
 	// Short RPM/TPM style 429s with no authoritative reset still need a brief
 	// local pause so the scheduler does not immediately reselect the same account.
