@@ -22,15 +22,12 @@ import (
 const (
 	grokComposerImageBridgeVisionModel     = "grok-build-0.1"
 	grokComposerImageBridgeMaxOutputTokens = 512
-	grokUpstreamUserAgent                  = "sub2api-grok/1.0"
-	grokCLIVersion                         = xai.CLIClientVersion
-	grokDefaultResponsesModel              = "grok-4.5"
-	// Short RPM/TPM style 429s with no authoritative reset still need a brief
-	// local pause so the scheduler does not immediately reselect the same account.
+	// grokUpstreamUserAgent lives in grok_upstream_headers.go (shared with TLS header helpers).
+	grokCLIVersion                = xai.CLIClientVersion
+	grokDefaultResponsesModel     = "grok-4.5"
 	grokRateLimitFallbackCooldown = 2 * time.Minute
-	// Free-tier allowance exhaustion (subscription:free-usage-exhausted) resets over a
-	// rolling 24-hour window. Mark as durable rate_limited (限流中) for that full
-	// window so the account does not re-enter the pool after the short RPM pause.
+	// Free-tier allowance exhaustion has no authoritative unlock header; keep
+	// the account out of rotation for the rolling 24-hour window.
 	grokFreeUsageExhaustedCooldown   = 24 * time.Hour
 	grokRateLimitRepeatCooldown      = 10 * time.Minute
 	grokRateLimitSustainedCooldown   = 30 * time.Minute
@@ -55,6 +52,10 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 	if strings.TrimSpace(upstreamModel) == "" {
 		upstreamModel = grokDefaultResponsesModel
 	}
+	// Account mappings are optional. Canonicalize client aliases even when the
+	// account has no model_mapping, matching the Chat Completions path and xAI's
+	// actual Responses model IDs.
+	upstreamModel = xai.ResolveGrokTextResponsesModelID(upstreamModel, grokDefaultResponsesModel)
 	if isGrokImageGenerationModel(upstreamModel) {
 		return nil, fmt.Errorf("model %s is an image model and is not available on the Responses endpoint; use /v1/images/generations instead", upstreamModel)
 	}
@@ -80,20 +81,15 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 	// Codex Responses Lite additional_tools part of the stable tool prefix.
 	cacheIdentity := resolveGrokCacheIdentity(c, patchedBody, "", upstreamModel)
 	mixedCacheIntentBody := append([]byte(nil), patchedBody...)
-	// /responses/compact rejects tool_choice; keep Free native-tool injection off
-	// that path even when no cache identity is available.
-	injectFreeTierTools := account.IsGrokOAuth() && !isOpenAIResponsesCompactPath(c)
-	patchedBody, err = applyGrokResponsesCacheIdentity(patchedBody, body, cacheIdentity, injectFreeTierTools)
+	patchedBody, err = applyGrokResponsesCacheIdentity(patchedBody, body, cacheIdentity, account.IsGrokOAuth())
 	if err != nil {
 		return nil, fmt.Errorf("apply grok prompt cache identity: %w", err)
 	}
 	// Free OAuth + client function tools: reuse Messages mixed-tools cache route
 	// (append web_search/x_search so xAI does not force non-cacheable build-free).
-	if injectFreeTierTools {
-		patchedBody, err = applyGrokFreeRequestToolCacheRoute(c, patchedBody, mixedCacheIntentBody, account, cacheIdentity)
-		if err != nil {
-			return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", err)
-		}
+	patchedBody, err = applyGrokFreeRequestToolCacheRoute(c, patchedBody, mixedCacheIntentBody, account, cacheIdentity)
+	if err != nil {
+		return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", err)
 	}
 
 	token, _, err := s.getRequestCredential(ctx, c, account)
@@ -112,7 +108,7 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 	upstreamStart := time.Now()
 	var resp *http.Response
 	for attempt := 0; ; attempt++ {
-		upstreamReq, buildErr := buildGrokResponsesRequest(upstreamCtx, c, account, patchedBody, token, cacheIdentity, s.cfg)
+		upstreamReq, buildErr := buildGrokResponsesRequest(upstreamCtx, c, account, patchedBody, token, cacheIdentity, s.cfg, s.settingService)
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -172,7 +168,13 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 			Kind:               kind,
 			Message:            upstreamMsg,
 		})
-		s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		errCtx := withGrokTeamRateLimitModel(ctx, upstreamModel)
+		s.handleGrokAccountUpstreamError(errCtx, account, resp.StatusCode, resp.Header, respBody)
+		// 429 / free-usage: stamp team+model cool so sibling accounts skip this model.
+		if resp.StatusCode == http.StatusTooManyRequests ||
+			classifyGrokUpstreamFailure(resp.StatusCode, respBody, upstreamModel).Class == GrokFailureFreeUsage {
+			markGrokTeamModelRateLimit(account, upstreamModel, resolveGrokTeamRateLimitUntil(time.Now().Add(grokTeamRateLimitDefaultTTL), time.Now()))
+		}
 		if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
@@ -184,11 +186,16 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		return s.handleErrorResponse(ctx, resp, c, account, patchedBody, upstreamModel)
 	}
 
-	s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)
+	// Attach model so rate-limit snapshots can fan out a team+model cool.
+	stateCtx := withGrokTeamRateLimitModel(ctx, upstreamModel)
+	s.updateGrokUsageFromResponse(stateCtx, account, resp.Header, resp.StatusCode)
 
 	var usage *OpenAIUsage
 	var firstTokenMs *int
 	responseID := ""
+	searchCount := 0
+	imageCount := 0
+	var imageOutputSizes []string
 	if reqStream {
 		maxLineSize := defaultMaxLineSize
 		if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
@@ -205,6 +212,9 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		usage = streamResult.usage
 		firstTokenMs = streamResult.firstTokenMs
 		responseID = strings.TrimSpace(streamResult.responseID)
+		searchCount = streamResult.searchCount
+		imageCount = streamResult.imageCount
+		imageOutputSizes = streamResult.imageOutputSizes
 	} else {
 		nonStreamResult, err := s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel)
 		if err != nil {
@@ -212,13 +222,16 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		}
 		usage = nonStreamResult.usage
 		responseID = strings.TrimSpace(nonStreamResult.responseID)
+		searchCount = nonStreamResult.searchCount
+		imageCount = nonStreamResult.imageCount
+		imageOutputSizes = nonStreamResult.imageOutputSizes
 	}
 
 	if usage == nil {
 		usage = &OpenAIUsage{}
 	}
 	reasoningEffort := extractOpenAIReasoningEffortFromBody(patchedBody, originalModel)
-	return &OpenAIForwardResult{
+	result := &OpenAIForwardResult{
 		RequestID:       firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("xai-request-id")),
 		ResponseID:      responseID,
 		Usage:           *usage,
@@ -230,7 +243,17 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		ResponseHeaders: resp.Header.Clone(),
 		Duration:        time.Since(startTime),
 		FirstTokenMs:    firstTokenMs,
-	}, nil
+	}
+	// Propagate search/image counters from the shared Responses handler — without
+	// this, stream/JSON counting runs but search_price_per_1k / image bills never apply.
+	if searchCount > 0 {
+		result.SearchCount = searchCount
+	}
+	if imageCount > 0 {
+		result.ImageCount = imageCount
+		result.ImageOutputSizes = imageOutputSizes
+	}
+	return result, nil
 }
 
 func isGrokInvalidEncryptedContentResponse(statusCode int, body []byte) bool {
@@ -421,7 +444,13 @@ func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, erro
 	if !json.Valid(body) {
 		return nil, fmt.Errorf("invalid json request body")
 	}
-	out, err := sjson.SetBytes(body, "model", upstreamModel)
+	// sjson may reuse the input backing array; keep the caller's request bytes
+	// unchanged because the same body can be inspected for billing/retry paths.
+	out, err := sjson.SetBytes(append([]byte(nil), body...), "model", upstreamModel)
+	if err != nil {
+		return nil, err
+	}
+	out, err = normalizeGrokResponsesReasoningEffort(out, upstreamModel)
 	if err != nil {
 		return nil, err
 	}
@@ -439,6 +468,16 @@ func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, erro
 	}
 	if strings.EqualFold(upstreamModel, "grok-4.5") {
 		for _, unsupportedField := range []string{"presence_penalty", "presencePenalty", "frequency_penalty", "frequencyPenalty", "stop"} {
+			if gjson.GetBytes(out, unsupportedField).Exists() {
+				out, err = sjson.DeleteBytes(out, unsupportedField)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	if grokModelRejectsLogprobs(upstreamModel) {
+		for _, unsupportedField := range []string{"logprobs", "top_logprobs"} {
 			if gjson.GetBytes(out, unsupportedField).Exists() {
 				out, err = sjson.DeleteBytes(out, unsupportedField)
 				if err != nil {
@@ -470,6 +509,17 @@ func patchGrokResponsesBodyBase(body []byte, upstreamModel string) ([]byte, erro
 	return out, nil
 }
 
+// xAI's Grok 4.20 family and newer models do not support OpenAI's logprobs
+// fields. Remove them before egress instead of forwarding a request the
+// upstream rejects. Older Grok models retain the fields for compatibility.
+func grokModelRejectsLogprobs(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndex(model, "/"); slash >= 0 {
+		model = strings.TrimSpace(model[slash+1:])
+	}
+	return strings.HasPrefix(model, "grok-4.20")
+}
+
 func sanitizeGrokResponsesModelCapabilities(body []byte, upstreamModel string) ([]byte, error) {
 	if !grokModelRejectsReasoningEffort(upstreamModel) {
 		return body, nil
@@ -496,6 +546,98 @@ func grokModelRejectsReasoningEffort(model string) bool {
 	}
 	switch model {
 	case "grok-composer", "grok-composer-2.5-fast", "composer-2.5":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeGrokResponsesReasoningEffort(body []byte, upstreamModel string) ([]byte, error) {
+	supportsEffort := grokSupportsReasoningEffort(upstreamModel)
+	out := body
+	var err error
+	for _, field := range []string{"reasoning.effort", "reasoning_effort"} {
+		value := gjson.GetBytes(out, field)
+		if !value.Exists() {
+			continue
+		}
+		normalized, keep := normalizeGrokReasoningEffortValue(value.String())
+		if !supportsEffort || !keep {
+			out, err = sjson.DeleteBytes(out, field)
+		} else {
+			out, err = sjson.SetBytes(out, field, normalized)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("normalize Grok reasoning field %s: %w", field, err)
+		}
+	}
+	if camel := gjson.GetBytes(out, "reasoningEffort"); camel.Exists() {
+		normalized, keep := normalizeGrokReasoningEffortValue(camel.String())
+		out, err = sjson.DeleteBytes(out, "reasoningEffort")
+		if err != nil {
+			return nil, fmt.Errorf("remove Grok reasoningEffort: %w", err)
+		}
+		if supportsEffort && keep && !gjson.GetBytes(out, "reasoning_effort").Exists() {
+			out, err = sjson.SetBytes(out, "reasoning_effort", normalized)
+			if err != nil {
+				return nil, fmt.Errorf("set Grok reasoning_effort: %w", err)
+			}
+		}
+	}
+	if reasoning := gjson.GetBytes(out, "reasoning"); reasoning.Exists() && reasoning.IsObject() && len(reasoning.Map()) == 0 {
+		out, err = sjson.DeleteBytes(out, "reasoning")
+		if err != nil {
+			return nil, fmt.Errorf("remove empty Grok reasoning: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func normalizeGrokChatReasoningEffort(body []byte, upstreamModel string) ([]byte, error) {
+	raw := strings.TrimSpace(gjson.GetBytes(body, "reasoning_effort").String())
+	if raw == "" {
+		raw = strings.TrimSpace(gjson.GetBytes(body, "reasoningEffort").String())
+	}
+	normalized, keep := normalizeGrokReasoningEffortValue(raw)
+	keep = keep && grokSupportsReasoningEffort(upstreamModel)
+	out := body
+	var err error
+	if gjson.GetBytes(out, "reasoningEffort").Exists() {
+		out, err = sjson.DeleteBytes(out, "reasoningEffort")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !keep {
+		if gjson.GetBytes(out, "reasoning_effort").Exists() {
+			out, err = sjson.DeleteBytes(out, "reasoning_effort")
+		}
+		return out, err
+	}
+	out, err = sjson.SetBytes(out, "reasoning_effort", normalized)
+	return out, err
+}
+
+func normalizeGrokReasoningEffortValue(raw string) (string, bool) {
+	value := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(raw)))
+	switch value {
+	case "none", "low", "medium", "high":
+		return value, true
+	case "minimal":
+		return "low", true
+	case "xhigh", "extrahigh", "max", "ultra":
+		return "high", true
+	default:
+		return "", false
+	}
+}
+
+func grokSupportsReasoningEffort(model string) bool {
+	model = strings.ToLower(xai.StripGrokProviderPrefix(strings.TrimSpace(model)))
+	switch model {
+	case xai.DefaultTextModel, "grok-4.5-latest", "grok-4.3", "grok-4.3-latest",
+		"grok-3-mini", "grok-3-mini-fast", "grok-4.20-0309-reasoning",
+		"grok-4.20-reasoning", "grok-4.20-multi-agent-0309":
 		return true
 	default:
 		return false
@@ -687,36 +829,30 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 
 	rawTools := tools.Array()
 	filteredTools := make([]json.RawMessage, 0, len(rawTools))
-	seenNames := make(map[string]struct{}, len(rawTools))
 	toolsChanged := false
 	for _, tool := range rawTools {
 		toolType := strings.TrimSpace(tool.Get("type").String())
-		if _, ok := grokResponsesSupportedToolTypes[toolType]; !ok {
-			toolsChanged = true
-			continue
-		}
-		// Clients (Grok Build, Claude Desktop bridges, etc.) often declare
-		// xAI built-in search as ordinary function tools. Promote those
-		// reserved names to native server tools so the upstream actually
-		// executes them instead of emitting a client-side function_call.
-		effectiveName := grokResponsesToolEffectiveName(tool)
-		rawTool := json.RawMessage(tool.Raw)
-		if toolType == "function" && isGrokNativeSearchToolName(effectiveName) {
-			rawTool = json.RawMessage(`{"type":"` + effectiveName + `"}`)
-			toolsChanged = true
-		}
-		if effectiveName != "" {
-			if _, duplicate := seenNames[effectiveName]; duplicate {
+		if _, ok := grokResponsesSupportedToolTypes[toolType]; ok {
+			raw := json.RawMessage(tool.Raw)
+			if toolType == "function" && (!tool.Get("parameters").Exists() || tool.Get("parameters").Type == gjson.Null) {
+				var payload map[string]any
+				if err := json.Unmarshal(raw, &payload); err != nil {
+					return nil, err
+				}
+				payload["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+				encoded, err := json.Marshal(payload)
+				if err != nil {
+					return nil, err
+				}
+				raw = encoded
 				toolsChanged = true
-				continue
 			}
-			seenNames[effectiveName] = struct{}{}
+			filteredTools = append(filteredTools, raw)
 		}
-		filteredTools = append(filteredTools, rawTool)
 	}
 
 	var err error
-	if toolsChanged || len(filteredTools) != len(rawTools) {
+	if len(filteredTools) != len(rawTools) || toolsChanged {
 		if len(filteredTools) == 0 {
 			body, err = sjson.DeleteBytes(body, "tools")
 		} else {
@@ -743,32 +879,6 @@ func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 		}
 	}
 	return body, nil
-}
-
-// isGrokNativeSearchToolName reports whether name is an xAI built-in search
-// tool that must be sent as {"type":"..."} rather than a function declaration.
-func isGrokNativeSearchToolName(name string) bool {
-	return name == "web_search" || name == "x_search"
-}
-
-// grokResponsesToolEffectiveName returns the stable identity used for tool
-// dedup and reserved-name promotion. Native search tools use their type;
-// function tools use top-level or nested name.
-func grokResponsesToolEffectiveName(tool gjson.Result) string {
-	toolType := strings.TrimSpace(tool.Get("type").String())
-	name := strings.TrimSpace(tool.Get("name").String())
-	if name == "" {
-		name = strings.TrimSpace(tool.Get("function.name").String())
-	}
-	if name != "" {
-		return name
-	}
-	switch toolType {
-	case "web_search", "x_search":
-		return toolType
-	default:
-		return ""
-	}
 }
 
 func shouldDropGrokToolChoice(toolChoice gjson.Result, tools []json.RawMessage) bool {
@@ -950,7 +1060,7 @@ func (s *OpenAIGatewayService) describeGrokComposerImage(
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	// Image-description probes are auxiliary requests, not conversation turns.
 	// Do not bind them to the caller's Grok prompt-cache identity.
-	upstreamReq, err := buildGrokResponsesRequest(upstreamCtx, c, account, body, token, "", s.cfg)
+	upstreamReq, err := buildGrokResponsesRequest(upstreamCtx, c, account, body, token, "", s.cfg, s.settingService)
 	releaseUpstreamCtx()
 	if err != nil {
 		return "", OpenAIUsage{}, fmt.Errorf("build grok composer image bridge request: %w", err)
@@ -1120,8 +1230,8 @@ func addOpenAIUsage(dst *OpenAIUsage, usage OpenAIUsage) {
 	dst.ImageOutputTokens += usage.ImageOutputTokens
 }
 
-func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, cacheIdentity string, cfg *config.Config) (*http.Request, error) {
-	targetURL, err := buildGrokResponsesURL(account, cfg)
+func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, cacheIdentity string, cfg *config.Config, settings ...*SettingService) (*http.Request, error) {
+	targetURL, err := buildGrokResponsesURL(account, cfg, settings...)
 	if err != nil {
 		return nil, err
 	}
@@ -1149,12 +1259,18 @@ func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Acc
 
 // applyGrokCLIHeaders identifies subscription traffic as a supported Grok CLI
 // version. The CLI gateway rejects otherwise valid OAuth requests without it.
+// Identity pins come from package xai so service-layer headers match the final
+// transport rewrite on cli-chat-proxy.grok.com.
 func applyGrokCLIHeaders(headers http.Header) {
 	if headers == nil {
 		return
 	}
-	headers.Set("User-Agent", grokUpstreamUserAgent)
-	headers.Set("X-Grok-Client-Version", grokCLIVersion)
+	version := xai.ResolveCLIVersion()
+	headers.Set("User-Agent", xai.CLIUserAgent(version))
+	headers.Set("X-Grok-Client-Version", version)
+	headers.Set("x-grok-client-version", version)
+	headers.Set("x-grok-client-identifier", xai.CLIClientIdentifier)
+	// Historical mode value expected by some unit tests / older CLI probes.
 	headers.Set("X-Grok-Client-Mode", "interactive")
 }
 
@@ -1177,6 +1293,15 @@ func (s *OpenAIGatewayService) updateGrokUsageSnapshot(ctx context.Context, acco
 		}
 	}
 
+	updates := map[string]any{
+		grokQuotaSnapshotExtraKey: snapshot,
+	}
+	// Also derive the scheduling-threshold extras (grok_sched_*) the evaluator
+	// reads in grokThresholdCandidates. Without this writer the admin-configured
+	// Grok auto-pause threshold could never fire (the read side was dead config).
+	for k, v := range buildGrokSchedulerExtraUpdates(snapshot) {
+		updates[k] = v
+	}
 	stateCtx := ctx
 	if hasActiveLimit {
 		var cancel context.CancelFunc
@@ -1184,15 +1309,12 @@ func (s *OpenAIGatewayService) updateGrokUsageSnapshot(ctx context.Context, acco
 		defer cancel()
 	}
 	if s.accountRepo != nil {
-		_ = s.accountRepo.UpdateExtra(stateCtx, accountID, map[string]any{
-			grokQuotaSnapshotExtraKey: snapshot,
-		})
+		_ = s.accountRepo.UpdateExtra(stateCtx, accountID, updates)
 	}
 	// Error responses are reconciled by handleGrokAccountUpstreamError. Pool-mode
 	// API keys retain the snapshot for observability but leave account health to
 	// the upstream pool. Other accounts install the immediate runtime and durable
-	// rate-limit state when the observed window is exhausted. Snapshot-aware
-	// persistence keeps active Free-usage countdowns from being refreshed.
+	// rate-limit state when the observed window is exhausted.
 	if hasActiveLimit && !account.IsPoolMode() {
 		s.rateLimitGrokWithSnapshot(stateCtx, account, snapshot, resetAt)
 	} else if recovery {
@@ -1226,13 +1348,8 @@ func parseGrokQuotaSnapshot(headers http.Header, statusCode int, now time.Time) 
 	return snapshot
 }
 
-// isGrokFreeUsageExhaustedError matches xAI Free-tier allowance exhaustion only.
-// Observed body:
-//
-//	{"code":"subscription:free-usage-exhausted","error":"You've used all the
-//	included free usage for model ... Usage resets over a rolling 24-hour window..."}
-//
-// Other Grok 429s keep the short temporary cooldown path.
+// isGrokFreeUsageExhaustedError matches the xAI Free-tier allowance error,
+// whose response usually has no usable reset header.
 func isGrokFreeUsageExhaustedError(statusCode int, responseBody []byte) bool {
 	if statusCode != http.StatusTooManyRequests || len(responseBody) == 0 {
 		return false
@@ -1242,42 +1359,27 @@ func isGrokFreeUsageExhaustedError(statusCode int, responseBody []byte) bool {
 		return true
 	}
 	lower := strings.ToLower(strings.TrimSpace(string(responseBody)))
-	if strings.Contains(lower, "free-usage-exhausted") || strings.Contains(lower, "free_usage_exhausted") {
-		return true
-	}
-	// Message form without the exact code field.
-	if strings.Contains(lower, "included free usage") ||
-		strings.Contains(lower, "used all the included free usage") {
-		return true
-	}
-	// Rolling 24h free-window language is treated as free-usage exhaustion only
-	// when free-usage wording is also present (avoid classifying generic RPM 429s).
-	if strings.Contains(lower, "rolling 24-hour") &&
-		(strings.Contains(lower, "free usage") || strings.Contains(lower, "free-usage")) {
-		return true
-	}
-	return false
+	return strings.Contains(lower, "free-usage-exhausted") ||
+		strings.Contains(lower, "free_usage_exhausted") ||
+		strings.Contains(lower, "included free usage") ||
+		(strings.Contains(lower, "rolling 24-hour") && strings.Contains(lower, "free usage"))
 }
 
-// markGrokFreeUsageExhaustedSnapshot tags a 429 snapshot so reset selection uses
-// the full 24h free-usage window (限流中) instead of the short RPM fallback.
 func markGrokFreeUsageExhaustedSnapshot(snapshot *xai.QuotaSnapshot, responseBody []byte, now time.Time) {
 	if snapshot == nil || !isGrokFreeUsageExhaustedError(snapshot.StatusCode, responseBody) {
 		return
-	}
-	snapshot.StatusCode = http.StatusTooManyRequests
-	if strings.TrimSpace(snapshot.UpdatedAt) == "" {
-		snapshot.UpdatedAt = now.UTC().Format(time.RFC3339)
 	}
 	if snapshot.Headers == nil {
 		snapshot.Headers = make(map[string]string)
 	}
 	snapshot.Headers["x-sub2api-grok-free-usage-exhausted"] = "1"
+	if strings.TrimSpace(snapshot.UpdatedAt) == "" {
+		snapshot.UpdatedAt = now.UTC().Format(time.RFC3339)
+	}
 }
 
 func grokQuotaSnapshotIsFreeUsageExhausted(snapshot *xai.QuotaSnapshot) bool {
-	return snapshot != nil &&
-		snapshot.Headers != nil &&
+	return snapshot != nil && snapshot.Headers != nil &&
 		snapshot.Headers["x-sub2api-grok-free-usage-exhausted"] == "1"
 }
 
@@ -1352,35 +1454,17 @@ func grokRateLimitResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time
 		return time.Time{}, false
 	}
 	if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
-		// Grok Free free-usage-exhausted has no unlock clock from xAI.
 		return now.Add(grokFreeUsageExhaustedCooldown), true
 	}
-	if exhausted {
-		// remaining=0 windows without a future reset still need a short pause.
+	if exhausted || snapshot.StatusCode == http.StatusTooManyRequests {
 		return now.Add(grokRateLimitFallbackCooldown), true
 	}
-	// Bare 429 without free-usage signal and without window/header reset is
-	// handled as temporary unschedulable by the caller, not durable rate_limited.
 	return time.Time{}, false
 }
 
 func grokRateLimitResetAtForAccount(account *Account, snapshot *xai.QuotaSnapshot, now time.Time) (time.Time, bool) {
 	resetAt, limited := grokRateLimitResetAt(snapshot, now)
-	if !limited {
-		return resetAt, false
-	}
-
-	// Free-usage-exhausted has no upstream reset clock. Once already rate_limited,
-	// never re-arm from now+24h (probes/tests/repeats would otherwise push the
-	// deadline indefinitely). Keep the existing RateLimitResetAt.
-	if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
-		if account != nil && account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
-			return *account.RateLimitResetAt, true
-		}
-		return resetAt, true
-	}
-
-	if !isGrokOAuthAccount(account) || snapshot == nil || snapshot.StatusCode != http.StatusTooManyRequests {
+	if !limited || !isGrokOAuthAccount(account) || snapshot == nil || snapshot.StatusCode != http.StatusTooManyRequests {
 		return resetAt, limited
 	}
 	if account.RateLimitedAt == nil || account.RateLimitResetAt == nil {
@@ -1407,25 +1491,6 @@ func grokRateLimitResetAtForAccount(account *Account, snapshot *xai.QuotaSnapsho
 		resetAt = adaptiveResetAt
 	}
 	return resetAt, true
-}
-
-// shouldPersistGrokRateLimit reports whether a newly computed rate-limit boundary
-// should be written. Free-usage and probe/test paths must not refresh an active
-// rate_limited countdown by overwriting it with now+duration.
-func shouldPersistGrokRateLimit(account *Account, snapshot *xai.QuotaSnapshot, resetAt, now time.Time) bool {
-	if account == nil || !resetAt.After(now) {
-		return false
-	}
-	// Already rate_limited: only allow a strictly later authoritative boundary
-	// (e.g. a longer window reset from headers). Never roll forward a free-usage
-	// 24h pause that was computed from "now".
-	if account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
-		if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
-			return false
-		}
-		return resetAt.After(*account.RateLimitResetAt)
-	}
-	return true
 }
 
 func normalizeGrokRateLimitResetAt(account *Account, resetAt, now time.Time) time.Time {
@@ -1473,14 +1538,19 @@ func persistGrokRateLimit(ctx context.Context, repo AccountRepository, account *
 	persistGrokRateLimitWithSnapshot(ctx, repo, account, nil, resetAt)
 }
 
+// persistGrokRateLimitWithSnapshot avoids rolling an already-active Free
+// allowance pause forward on every probe while still allowing a later
+// authoritative upstream boundary to extend a rate limit.
 func persistGrokRateLimitWithSnapshot(ctx context.Context, repo AccountRepository, account *Account, snapshot *xai.QuotaSnapshot, resetAt time.Time) {
 	if repo == nil || account == nil || account.ID <= 0 {
 		return
 	}
 	now := time.Now()
 	resetAt = normalizeGrokRateLimitResetAt(account, resetAt, now)
-	if !shouldPersistGrokRateLimit(account, snapshot, resetAt, now) {
-		return
+	if account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
+		if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) || !resetAt.After(*account.RateLimitResetAt) {
+			return
+		}
 	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
@@ -1494,15 +1564,32 @@ func persistGrokRateLimitWithSnapshot(ctx context.Context, repo AccountRepositor
 		slog.Warn("persist_grok_rate_limit_failed", "account_id", account.ID, "reset_at", resetAt.UTC(), "error", err)
 		return
 	}
-	// Keep in-memory view aligned so subsequent probe/test calls on the same
-	// account object also see the active rate_limited window.
 	limitedAt := now
 	account.RateLimitedAt = &limitedAt
 	account.RateLimitResetAt = &resetAt
 }
 
 func (s *OpenAIGatewayService) rateLimitGrok(ctx context.Context, account *Account, resetAt time.Time) {
-	s.rateLimitGrokWithSnapshot(ctx, account, nil, resetAt)
+	if s == nil || account == nil {
+		return
+	}
+	now := time.Now()
+	resetAt = normalizeGrokRateLimitResetAt(account, resetAt, now)
+
+	runtimeUntil := resetAt
+	if account.TempUnschedulableUntil != nil && account.TempUnschedulableUntil.After(runtimeUntil) {
+		runtimeUntil = *account.TempUnschedulableUntil
+	}
+	s.BlockAccountScheduling(account, runtimeUntil, "429")
+	persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
+
+	// Propagate a short team+model cool so sibling OAuth accounts on the same
+	// xAI team skip the hot model without waiting for each to hit 429 alone.
+	// Model is taken from the latest request context when available; empty is a
+	// no-op inside markGrokTeamModelRateLimit.
+	if model, _ := ctx.Value(grokTeamRateLimitModelContextKey{}).(string); model != "" {
+		markGrokTeamModelRateLimit(account, model, resolveGrokTeamRateLimitUntil(resetAt, now))
+	}
 }
 
 func (s *OpenAIGatewayService) rateLimitGrokWithSnapshot(ctx context.Context, account *Account, snapshot *xai.QuotaSnapshot, resetAt time.Time) {
@@ -1511,20 +1598,109 @@ func (s *OpenAIGatewayService) rateLimitGrokWithSnapshot(ctx context.Context, ac
 	}
 	now := time.Now()
 	resetAt = normalizeGrokRateLimitResetAt(account, resetAt, now)
-	if !shouldPersistGrokRateLimit(account, snapshot, resetAt, now) {
-		// Still keep runtime block at the existing deadline when already limited.
-		if account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
-			s.BlockAccountScheduling(account, *account.RateLimitResetAt, "429")
-		}
+	if account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) &&
+		(grokQuotaSnapshotIsFreeUsageExhausted(snapshot) || !resetAt.After(*account.RateLimitResetAt)) {
+		s.BlockAccountScheduling(account, *account.RateLimitResetAt, "429")
 		return
 	}
-
 	runtimeUntil := resetAt
 	if account.TempUnschedulableUntil != nil && account.TempUnschedulableUntil.After(runtimeUntil) {
 		runtimeUntil = *account.TempUnschedulableUntil
 	}
 	s.BlockAccountScheduling(account, runtimeUntil, "429")
 	persistGrokRateLimitWithSnapshot(ctx, s.accountRepo, account, snapshot, resetAt)
+}
+
+// buildGrokSchedulerExtraUpdates derives the grok_sched_* scheduling snapshot
+// (utilization percent + reset time) consumed by EvaluateAccountSchedulingThreshold.
+// Utilization is the most-constrained of the requests/tokens windows.
+func buildGrokSchedulerExtraUpdates(snapshot *xai.QuotaSnapshot) map[string]any {
+	if snapshot == nil {
+		return nil
+	}
+	util, reset, ok := grokSnapshotUtilization(snapshot)
+	if !ok {
+		return nil
+	}
+	updates := map[string]any{
+		"grok_sched_utilization":      util,
+		"grok_sched_usage_updated_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if reset != nil {
+		// 防御：调度阈值暂停时长由 grok_sched_reset_at 决定。若上游返回脏的
+		// reset 头（例如把相对毫秒 "6000" 误当相对秒解析出 ~33h 的未来时刻），
+		// 不设上限会把耗尽账号长时间锁死。xAI 配额窗口不会超过一天，因此对
+		// 未来时刻做 grokMaxSchedulingResetHorizon 钳制；过去/无效值直接不写。
+		now := time.Now()
+		if reset.After(now) {
+			capped := *reset
+			if horizon := now.Add(grokMaxSchedulingResetHorizon); capped.After(horizon) {
+				capped = horizon
+			}
+			updates["grok_sched_reset_at"] = capped.UTC().Format(time.RFC3339)
+		}
+	}
+	return updates
+}
+
+// grokSnapshotUtilization returns the highest window utilization (0-100) across
+// the requests/tokens quota windows and the reset time of that window.
+func grokSnapshotUtilization(snapshot *xai.QuotaSnapshot) (float64, *time.Time, bool) {
+	if snapshot == nil {
+		return 0, nil, false
+	}
+	best := -1.0
+	var bestReset *time.Time
+	consider := func(window *xai.QuotaWindow) {
+		if window == nil || window.Limit == nil || *window.Limit <= 0 || window.Remaining == nil {
+			return
+		}
+		remaining := *window.Remaining
+		if remaining < 0 {
+			remaining = 0
+		}
+		util := (1 - float64(remaining)/float64(*window.Limit)) * 100
+		if util < 0 {
+			util = 0
+		}
+		if util > 100 {
+			util = 100
+		}
+		if util > best {
+			best = util
+			if window.ResetUnix != nil {
+				t := time.Unix(*window.ResetUnix, 0).UTC()
+				bestReset = &t
+			} else {
+				bestReset = nil
+			}
+		}
+	}
+	consider(snapshot.Requests)
+	consider(snapshot.Tokens)
+	if best < 0 {
+		return 0, nil, false
+	}
+	return best, bestReset, true
+}
+
+// grokMaxSchedulingResetHorizon bounds how far into the future a Grok
+// scheduling-threshold pause (grok_sched_reset_at) may be set, so a malformed
+// upstream reset header can't park an over-threshold account for days. xAI quota
+// windows do not exceed ~a day.
+const grokMaxSchedulingResetHorizon = 25 * time.Hour
+
+// grokTeamRateLimitModelContextKey carries the upstream model for team cools.
+type grokTeamRateLimitModelContextKey struct{}
+
+// withGrokTeamRateLimitModel attaches the upstream model name for rate-limit
+// side effects (team+model cool). Safe when model is empty.
+func withGrokTeamRateLimitModel(ctx context.Context, model string) context.Context {
+	model = strings.TrimSpace(model)
+	if model == "" || ctx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, grokTeamRateLimitModelContextKey{}, model)
 }
 
 func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte) {
@@ -1536,107 +1712,92 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 	}
 	now := time.Now()
 	snapshot := parseGrokQuotaSnapshot(headers, statusCode, now)
-	// Only Grok Free free-usage-exhausted lacks an authoritative unlock time.
-	// Tag that case so we enter durable rate_limited for 24h; everything else
-	// keeps header-driven rate limits or short temp-unschedulable cooldowns.
 	markGrokFreeUsageExhaustedSnapshot(snapshot, responseBody, now)
+	s.updateGrokUsageSnapshot(ctx, account, snapshot)
 
-	// Explicit per-account 403 rules still apply in pool mode. Otherwise pool
-	// accounts retain quota snapshots for observability without local health state.
-	if statusCode == http.StatusForbidden {
-		s.updateGrokUsageSnapshot(ctx, account, snapshot)
-		if s.applyGrokForbiddenPolicy(ctx, account, responseBody) {
-			return
+	// Body-first free-usage / empty / billing / capacity must run before the
+	// status switch so non-429 free-usage bodies still cool the account.
+	// Pool-mode still skips durable mutation unless an explicit temp rule matches.
+	decision := classifyGrokUpstreamFailure(statusCode, responseBody, "")
+	if decision.ShouldCooldown && decision.Class != GrokFailureNone && decision.Class != GrokFailureRateLimit {
+		if account.IsPoolMode() {
+			// Allow configured temp rules (403) below; skip default body cools.
+		} else {
+			// A free-tier exhaustion message describes a rolling usage window. Use
+			// an upstream absolute reset (or Retry-After) when available; otherwise
+			// apply only a short probe cooldown. Never start a fabricated 24h window
+			// at the instant this error was received.
+			if decision.Class == GrokFailureFreeUsage {
+				if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
+					if resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, now); limited {
+						s.rateLimitGrokWithSnapshot(ctx, account, snapshot, resetAt)
+					}
+					return
+				}
+				if resetAt, limited := grokRateLimitResetAtForAccount(account, parseGrokQuotaSnapshot(headers, statusCode, now), now); limited && resetAt.After(now) {
+					if decision.Model != "" && isGrokModelSpecificFreeUsage(strings.ToLower(decision.Reason), decision.Model) {
+						markGrokModelQuotaBlock(account.ID, decision.Model, resetAt)
+						return
+					}
+					s.rateLimitGrok(ctx, account, resetAt)
+					return
+				}
+			}
+			if s.applyGrokUpstreamFailureDecision(ctx, account, decision) {
+				return
+			}
 		}
 	}
+
+	if statusCode == http.StatusForbidden && s.applyGrokForbiddenPolicy(ctx, account, responseBody) {
+		return
+	}
 	if account.IsPoolMode() {
-		if statusCode != http.StatusForbidden {
-			s.updateGrokUsageSnapshot(ctx, account, snapshot)
-		}
 		slog.Info("grok_pool_mode_error_state_skipped", "account_id", account.ID, "status_code", statusCode)
 		return
 	}
 	switch statusCode {
 	case http.StatusUnauthorized:
-		s.updateGrokUsageSnapshot(ctx, account, snapshot)
 		s.tempUnscheduleGrok(ctx, account, 10*time.Minute, "grok credentials unauthorized")
 	case http.StatusPaymentRequired:
+		// 402 without a body-classified billing decision: keep the legacy 30m cool.
 		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok payment required")
 	case http.StatusForbidden:
+		// Spending-limit already handled by body classifier when phrasing matches.
+		if isGrokSpendingLimitError(responseBody) {
+			s.rateLimitGrok(ctx, account, grokSpendingLimitResetAt(account, time.Now()))
+			return
+		}
 		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok access or entitlement denied")
 	case http.StatusTooManyRequests:
-		if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
-			// Persist snapshot + 24h rate_limited (限流中). Do not refresh if already limited.
-			s.updateGrokUsageSnapshot(ctx, account, snapshot)
-			if resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, now); limited {
-				s.rateLimitGrokWithSnapshot(ctx, account, snapshot, resetAt)
-			}
-			return
-		}
-		// Header-driven remaining=0 / Retry-After → durable rate limit at that boundary
-		// (updateGrokUsageSnapshot also persists rate_limited via rateLimitGrokWithSnapshot).
-		_, limited := grokRateLimitResetAtForAccount(account, snapshot, now)
-		if limited && !isBareGrok429WithoutReset(snapshot, now) {
-			s.updateGrokUsageSnapshot(ctx, account, snapshot)
-			return
-		}
-		// Bare 429 without free-usage signal and without unlock time → temp unusable.
-		// Persist snapshot for UI/debug but do not enter durable rate_limited.
-		if snapshot != nil && s.accountRepo != nil {
-			stateCtx, cancel := openAIAccountStateContext(ctx)
-			_ = s.accountRepo.UpdateExtra(stateCtx, account.ID, map[string]any{
-				grokQuotaSnapshotExtraKey: snapshot,
-			})
-			cancel()
-		}
-		s.tempUnscheduleGrok(ctx, account, grokRateLimitFallbackCooldown, "grok temporary rate limit")
+		// updateGrokUsageSnapshot installs rate-limit state for non-pool accounts.
+		// Free-usage 429 was already cooled above via body classification.
 	default:
-		if snapshot != nil {
-			s.updateGrokUsageSnapshot(ctx, account, snapshot)
-		}
 		if statusCode >= 500 {
 			s.tempUnscheduleGrok(ctx, account, 2*time.Minute, "grok upstream temporary error")
 		}
 	}
 }
 
-// isBareGrok429WithoutReset is true when status is 429 but neither Retry-After
-// nor an exhausted window reset is available. Free-usage is handled separately.
-func isBareGrok429WithoutReset(snapshot *xai.QuotaSnapshot, now time.Time) bool {
-	if snapshot == nil || snapshot.StatusCode != http.StatusTooManyRequests {
+// isGrokSpendingLimitError detects xAI billing exhaustion bodies (often 403, sometimes 402).
+func isGrokSpendingLimitError(responseBody []byte) bool {
+	if len(responseBody) == 0 {
 		return false
 	}
-	if grokQuotaSnapshotIsFreeUsageExhausted(snapshot) {
-		return false
+	code := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		gjson.GetBytes(responseBody, "code").String(),
+		gjson.GetBytes(responseBody, "error.code").String(),
+	)))
+	if code == "personal-team-blocked:spending-limit" {
+		return true
 	}
-	if snapshot.RetryAfterSeconds != nil && *snapshot.RetryAfterSeconds > 0 {
-		observedAt := now
-		if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(snapshot.UpdatedAt)); err == nil {
-			observedAt = parsed
-		}
-		if observedAt.Add(time.Duration(*snapshot.RetryAfterSeconds) * time.Second).After(now) {
-			return false
-		}
-	}
-	for _, window := range []*xai.QuotaWindow{snapshot.Requests, snapshot.Tokens} {
-		if window == nil || window.Remaining == nil || *window.Remaining > 0 {
-			continue
-		}
-		if window.ResetUnix != nil && *window.ResetUnix > now.Unix() {
-			return false
-		}
-		if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(window.ResetAt)); err == nil && parsed.After(now) {
-			return false
-		}
-	}
-	// remaining=0 without future reset still counts as exhausted-window signal
-	// for updateGrokUsageSnapshot fallback; treat as not bare only when exhausted.
-	for _, window := range []*xai.QuotaWindow{snapshot.Requests, snapshot.Tokens} {
-		if window != nil && window.Remaining != nil && *window.Remaining <= 0 {
-			return false
-		}
-	}
-	return true
+	message := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		gjson.GetBytes(responseBody, "error").String(),
+		gjson.GetBytes(responseBody, "error.message").String(),
+		gjson.GetBytes(responseBody, "message").String(),
+	)))
+	return strings.Contains(message, "spending limit") ||
+		strings.Contains(message, "run out of credits")
 }
 
 func (s *OpenAIGatewayService) tempUnscheduleGrok(ctx context.Context, account *Account, cooldown time.Duration, reason string) {

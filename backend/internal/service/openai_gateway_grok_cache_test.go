@@ -24,6 +24,36 @@ func newGrokCacheTestContext(apiKeyID int64) *gin.Context {
 	return c
 }
 
+func TestGrokPreviousResponseSessionSeed(t *testing.T) {
+	require.Equal(t, "grok-prev-resp:resp_abc123", grokPreviousResponseSessionSeed([]byte(`{"previous_response_id":"resp_abc123"}`)))
+	require.Empty(t, grokPreviousResponseSessionSeed([]byte(`{"previous_response_id":"msg_abc123"}`)))
+	require.Empty(t, grokPreviousResponseSessionSeed([]byte(`{"previous_response_id":""}`)))
+	require.Empty(t, grokPreviousResponseSessionSeed([]byte(`{}`)))
+}
+
+func TestResolveGrokCacheIdentityUsesPreviousResponseIDWhenNoOtherSeed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c := newGrokCacheTestContext(301)
+	// No prompt_cache_key / headers / reusable prefix — only previous_response_id.
+	body := []byte(`{"model":"grok","input":[{"role":"user","content":"follow up"}],"previous_response_id":"resp_chain_001"}`)
+	got := resolveGrokCacheIdentity(c, body, "", "grok-4.5")
+	require.NotEmpty(t, got)
+
+	// Same previous_response_id → same identity (model already in isolated seed).
+	again := resolveGrokCacheIdentity(c, body, "", "grok-4.5")
+	require.Equal(t, got, again)
+
+	// Different model → different identity (model scope).
+	otherModel := resolveGrokCacheIdentity(c, body, "", "grok-4.3")
+	require.NotEqual(t, got, otherModel)
+
+	// prompt_cache_key still wins over previous_response_id.
+	withCache := []byte(`{"model":"grok","prompt_cache_key":"client-session","previous_response_id":"resp_chain_001","input":[{"role":"user","content":"x"}]}`)
+	cacheID := resolveGrokCacheIdentity(c, withCache, "", "grok-4.5")
+	require.NotEmpty(t, cacheID)
+	require.NotEqual(t, got, cacheID)
+}
+
 func TestResolveGrokCacheIdentityStableAcrossAppendOnlyTurns(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c := newGrokCacheTestContext(101)
@@ -330,15 +360,12 @@ func TestApplyGrokCacheIdentityWritesResponsesBodyAndHeader(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, gjson.GetBytes(chatBody, "prompt_cache_key").Exists())
 
-	// Empty identity still clears a client prompt_cache_key, but Free/OAuth
-	// tool-free requests still get native search tools so they leave build-free.
 	unscopedSourceBody := []byte(`{"model":"grok","prompt_cache_key":"raw-client-key"}`)
 	unscopedBody, err := applyGrokResponsesCacheIdentity(unscopedSourceBody, unscopedSourceBody, "", true)
 	require.NoError(t, err)
 	require.False(t, gjson.GetBytes(unscopedBody, "prompt_cache_key").Exists())
-	require.Equal(t, "web_search", gjson.GetBytes(unscopedBody, "tools.0.type").String())
-	require.Equal(t, "x_search", gjson.GetBytes(unscopedBody, "tools.1.type").String())
-	require.Equal(t, grokFreeCacheDisabledToolChoice, gjson.GetBytes(unscopedBody, "tool_choice").String())
+	require.False(t, gjson.GetBytes(unscopedBody, "tools").Exists())
+	require.False(t, gjson.GetBytes(unscopedBody, "tool_choice").Exists())
 }
 
 func TestGrokFreeMessagesClientToolCacheDefaultsOnForKnownFree(t *testing.T) {
@@ -714,17 +741,6 @@ func TestApplyGrokCacheIdentityRecognizesResponsesLiteAdditionalTools(t *testing
 	require.Equal(t, "lookup", tools[0].Get("name").String())
 	require.False(t, gjson.GetBytes(patched, "tool_choice").Exists())
 	require.Equal(t, "isolated-id", gjson.GetBytes(patched, "prompt_cache_key").String())
-
-	// Free route then complements missing native search.
-	account := healthyGrokOAuthGatewayTestAccount(918, "access-token")
-	account.Credentials["subscription_tier"] = "free"
-	patched, err = applyGrokFreeMessagesFunctionToolCacheRoute(patched, intentBody, account, "isolated-id")
-	require.NoError(t, err)
-	tools = gjson.GetBytes(patched, "tools").Array()
-	require.Len(t, tools, 3)
-	require.Equal(t, "lookup", tools[0].Get("name").String())
-	require.Equal(t, "web_search", tools[1].Get("type").String())
-	require.Equal(t, "x_search", tools[2].Get("type").String())
 }
 
 func TestGrokFreeCacheRoutePreservesMixedSupportedToolsWithSearchIntent(t *testing.T) {
@@ -773,17 +789,16 @@ func TestApplyGrokCacheIdentityRequiresPatchedFunctionTools(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			beforeTools := gjson.Get(tt.patchedBody, "tools")
 			body, err := applyGrokResponsesCacheIdentity([]byte(tt.patchedBody), intentBody, "isolated-id", true)
 			require.NoError(t, err)
 			body, err = applyGrokFreeMessagesFunctionToolCacheRoute(body, intentBody, account, "isolated-id")
+
 			require.NoError(t, err)
 			require.Equal(t, "isolated-id", gjson.GetBytes(body, "prompt_cache_key").String())
-			types := map[string]bool{}
-			for _, tool := range gjson.GetBytes(body, "tools").Array() {
-				types[tool.Get("type").String()] = true
-			}
-			require.True(t, types["web_search"])
-			require.True(t, types["x_search"])
+			afterTools := gjson.GetBytes(body, "tools")
+			require.Equal(t, beforeTools.Exists(), afterTools.Exists())
+			require.Equal(t, beforeTools.Raw, afterTools.Raw)
 		})
 	}
 }
@@ -823,65 +838,6 @@ func TestGrokFreeMessagesFunctionToolCacheRouteRequiresKnownFreeTier(t *testing.
 					"source":             "billing_probe",
 					"monthly_updated_at": "2026-07-15T05:00:00Z",
 				}}
-				return a
-			}(),
-			wantMix: true,
-		},
-		{
-			// Real Free OAuth probes often succeed weekly (empty plan, no
-			// credit bar) while monthly returns an empty body → Partial.
-			// That must still inject native search so Free stays cacheable.
-			name: "free weekly-only partial blank plan",
-			account: func() *Account {
-				a := healthyGrokOAuthGatewayTestAccount(9114, "access-token")
-				a.Extra = map[string]any{grokBillingExtraKey: map[string]any{
-					"status_code":       http.StatusOK,
-					"source":            "billing_probe",
-					"period_type":       "weekly",
-					"weekly_updated_at": "2026-07-15T05:00:00Z",
-					"partial":           true,
-					"failed_windows":    []string{"monthly"},
-				}}
-				return a
-			}(),
-			wantMix: true,
-		},
-		{
-			// Captured from a live Free OAuth export (2026-07-28): dual-window
-			// success with empty plan, zero monthly_limit_cents/used_cents, and
-			// no credit bar. This is the common paid-looking Free shape that
-			// still must inject native search tools.
-			name: "real free dual-window zero monthly cents",
-			account: func() *Account {
-				a := healthyGrokOAuthGatewayTestAccount(9115, "access-token")
-				a.Extra = map[string]any{
-					grokBillingExtraKey: map[string]any{
-						"billing_period_end":   "2026-08-01T00:00:00+00:00",
-						"billing_period_start": "2026-07-01T00:00:00+00:00",
-						"fetched_at":           "2026-07-28T08:49:40Z",
-						"included_used_cents":  0,
-						"monthly_limit_cents":  0,
-						"monthly_status_code":  200,
-						"monthly_updated_at":   "2026-07-28T08:49:40Z",
-						"period_end":           "2026-07-29T00:00:00+00:00",
-						"period_start":         "2026-07-22T00:00:00+00:00",
-						"period_type":          "weekly",
-						"source":               "billing_probe",
-						"status_code":          200,
-						"updated_at":           "2026-07-28T08:49:40Z",
-						"used_cents":           0,
-						"weekly_status_code":   200,
-						"weekly_updated_at":    "2026-07-28T08:49:40Z",
-					},
-					grokQuotaSnapshotExtraKey: map[string]any{
-						"headers_observed": true,
-						"status_code":      200,
-						"tokens": map[string]any{
-							"limit":     xai.GrokFreeRolling24hTokenLimit,
-							"remaining": xai.GrokFreeRolling24hTokenLimit,
-						},
-					},
-				}
 				return a
 			}(),
 			wantMix: true,
@@ -933,31 +889,25 @@ func TestGrokFreeMessagesFunctionToolCacheRouteRequiresKnownFreeTier(t *testing.
 			}(),
 		},
 		{
-			// Dual-window failure leaves no Weekly/MonthlyUpdatedAt — still
-			// fail-closed so unobserved accounts do not get Free injection.
-			name: "dual-window billing failure remains unknown",
+			name: "paid billing overrides stale free credentials",
 			account: func() *Account {
-				a := healthyGrokOAuthGatewayTestAccount(9122, "access-token")
-				a.Extra = map[string]any{grokBillingExtraKey: map[string]any{
-					"status_code":    http.StatusBadGateway,
-					"source":         "billing_probe",
-					"partial":        true,
-					"failed_windows": []string{"weekly", "monthly"},
-				}}
+				a := healthyGrokOAuthGatewayTestAccount(9123, "access-token")
+				a.Credentials["subscription_tier"] = "free"
+				a.Extra = map[string]any{
+					grokBillingExtraKey: map[string]any{"plan": "SuperGrok", "status_code": http.StatusOK},
+				}
 				return a
 			}(),
 		},
 		{
-			name: "weekly credit bar is paid evidence",
+			name: "partial billing without monthly evidence remains unknown",
 			account: func() *Account {
-				a := healthyGrokOAuthGatewayTestAccount(9123, "access-token")
+				a := healthyGrokOAuthGatewayTestAccount(9122, "access-token")
 				a.Extra = map[string]any{grokBillingExtraKey: map[string]any{
-					"status_code":        http.StatusOK,
-					"source":             "billing_probe",
-					"period_type":        "weekly",
-					"usage_percent":      12.0,
-					"weekly_updated_at":  "2026-07-15T05:00:00Z",
-					"monthly_updated_at": "2026-07-15T05:00:00Z",
+					"status_code":    http.StatusOK,
+					"source":         "billing_probe",
+					"partial":        true,
+					"failed_windows": []string{"monthly"},
 				}}
 				return a
 			}(),
@@ -993,10 +943,7 @@ func TestGrokFreeMessagesFunctionToolCacheRouteRequiresKnownFreeTier(t *testing.
 	}
 }
 
-func TestGrokFreeMessagesFunctionToolCacheRouteInjectsWithoutIdentity(t *testing.T) {
-	// Free tool injection must not require a prompt-cache identity. Clients that
-	// lack a stable session seed still need web_search/x_search so xAI selects
-	// the tool-capable route instead of build-free.
+func TestGrokFreeMessagesFunctionToolCacheRouteRequiresIdentity(t *testing.T) {
 	account := healthyGrokOAuthGatewayTestAccount(915, "access-token")
 	account.Credentials["subscription_tier"] = "free"
 	body := []byte(`{"model":"grok","tools":[{"type":"function","name":"lookup"}],"tool_choice":"auto"}`)
@@ -1004,54 +951,70 @@ func TestGrokFreeMessagesFunctionToolCacheRouteInjectsWithoutIdentity(t *testing
 	patched, err := applyGrokFreeMessagesFunctionToolCacheRoute(body, body, account, "")
 
 	require.NoError(t, err)
-	tools := gjson.GetBytes(patched, "tools").Array()
-	require.Len(t, tools, 3)
-	require.Equal(t, "lookup", tools[0].Get("name").String())
-	require.Equal(t, "web_search", tools[1].Get("type").String())
-	require.Equal(t, "x_search", tools[2].Get("type").String())
+	require.JSONEq(t, string(body), string(patched))
+	require.Len(t, gjson.GetBytes(patched, "tools").Array(), 1)
 }
 
-func TestApplyGrokCacheIdentityInjectsNativeToolsWithoutIdentity(t *testing.T) {
-	sourceBody := []byte(`{"model":"grok-4.5","input":"hello"}`)
-	body, err := applyGrokResponsesCacheIdentity(sourceBody, sourceBody, "", true)
-	require.NoError(t, err)
-	require.False(t, gjson.GetBytes(body, "prompt_cache_key").Exists())
-	require.Equal(t, "web_search", gjson.GetBytes(body, "tools.0.type").String())
-	require.Equal(t, "x_search", gjson.GetBytes(body, "tools.1.type").String())
-	require.Equal(t, grokFreeCacheDisabledToolChoice, gjson.GetBytes(body, "tool_choice").String())
-}
-
-func TestApplyGrokCacheIdentityAlwaysEnsuresNativeSearchTools(t *testing.T) {
-	// Tool-free / empty tools: identity layer injects search + tool_choice=none.
-	toolFree := []struct {
+func TestApplyGrokCacheIdentityPreservesIneligibleClientToolFields(t *testing.T) {
+	tests := []struct {
 		name string
 		body string
 	}{
-		{name: "empty tools array", body: `{"model":"grok","tools":[]}`},
-		{name: "null tools", body: `{"model":"grok","tools":null}`},
-		{name: "no tools field", body: `{"model":"grok","input":"hello"}`},
-	}
-	for _, tt := range toolFree {
-		t.Run(tt.name, func(t *testing.T) {
-			body, err := applyGrokResponsesCacheIdentity([]byte(tt.body), []byte(tt.body), "isolated-id", true)
-			require.NoError(t, err)
-			require.Equal(t, "isolated-id", gjson.GetBytes(body, "prompt_cache_key").String())
-			require.Equal(t, "web_search", gjson.GetBytes(body, "tools.0.type").String())
-			require.Equal(t, "x_search", gjson.GetBytes(body, "tools.1.type").String())
-			require.Equal(t, grokFreeCacheDisabledToolChoice, gjson.GetBytes(body, "tool_choice").String())
-		})
+		{
+			name: "empty tools array",
+			body: `{"model":"grok","tools":[]}`,
+		},
+		{
+			name: "null tools",
+			body: `{"model":"grok","tools":null}`,
+		},
+		{
+			name: "tool choice only",
+			body: `{"model":"grok","tool_choice":{"type":"function","name":"lookup"}}`,
+		},
+		{
+			name: "null tool choice",
+			body: `{"model":"grok","tool_choice":null}`,
+		},
+		{
+			name: "native tool with auto choice",
+			body: `{"model":"grok","tools":[{"type":"web_search"}],"tool_choice":"auto"}`,
+		},
+		{
+			name: "function with required choice",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup"}],"tool_choice":"required"}`,
+		},
+		{
+			name: "function with none choice",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup"}],"tool_choice":"none"}`,
+		},
+		{
+			name: "function with specific choice",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup"}],"tool_choice":{"type":"function","name":"lookup"}}`,
+		},
+		{
+			name: "function with object auto choice",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup"}],"tool_choice":{"type":"auto"}}`,
+		},
+		{
+			name: "function mixed with unsupported tool",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup"},{"type":"namespace","name":"client_tools"}],"tool_choice":"auto"}`,
+		},
+		{
+			name: "unsupported tool only",
+			body: `{"model":"grok","tools":[{"type":"namespace","name":"client_tools"}]}`,
+		},
+		{
+			name: "chat completions function shape",
+			body: `{"model":"grok","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":"auto"}`,
+		},
+		{
+			name: "incomplete responses function",
+			body: `{"model":"grok","tools":[{"type":"function","parameters":{"type":"object"}}]}`,
+		},
 	}
 
-	// Explicit tool intent: identity layer leaves tools alone (Free path handles search).
-	withIntent := []struct {
-		name string
-		body string
-	}{
-		{name: "function with required choice", body: `{"model":"grok","tools":[{"type":"function","name":"lookup"}],"tool_choice":"required"}`},
-		{name: "function mixed with unsupported tool", body: `{"model":"grok","tools":[{"type":"function","name":"lookup"},{"type":"namespace","name":"client_tools"}],"tool_choice":"auto"}`},
-		{name: "tool choice only", body: `{"model":"grok","tool_choice":{"type":"function","name":"lookup"}}`},
-	}
-	for _, tt := range withIntent {
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			beforeTools := gjson.Get(tt.body, "tools")
 			beforeChoice := gjson.Get(tt.body, "tool_choice")
@@ -1066,42 +1029,34 @@ func TestApplyGrokCacheIdentityAlwaysEnsuresNativeSearchTools(t *testing.T) {
 	}
 }
 
-func TestGrokFreeRouteInjectsSearchEvenWhenClientToolsPresent(t *testing.T) {
-	account := healthyGrokOAuthGatewayTestAccount(916, "access-token")
-	account.Credentials["subscription_tier"] = "free"
-	body := []byte(`{"model":"grok","tools":[{"type":"function","name":"lookup"},{"type":"namespace","name":"client_tools"}],"tool_choice":"auto"}`)
-	patched, err := applyGrokFreeMessagesFunctionToolCacheRoute(body, body, account, "")
-	require.NoError(t, err)
-	types := map[string]bool{}
-	for _, tool := range gjson.GetBytes(patched, "tools").Array() {
-		types[tool.Get("type").String()] = true
+func TestApplyGrokCacheIdentityUsesPreSanitizationToolIntent(t *testing.T) {
+	tests := []struct {
+		name       string
+		intentBody string
+	}{
+		{
+			name:       "unsupported tools removed by sanitizer",
+			intentBody: `{"model":"grok","tools":[{"type":"namespace","name":"client_tools"}]}`,
+		},
+		{
+			name:       "tool choice removed with unsupported tool",
+			intentBody: `{"model":"grok","tools":[{"type":"namespace","name":"client_tools"}],"tool_choice":{"type":"namespace","name":"client_tools"}}`,
+		},
 	}
-	require.True(t, types["function"])
-	require.True(t, types["namespace"])
-	require.True(t, types["web_search"])
-	require.True(t, types["x_search"])
-}
 
-func TestApplyGrokCacheIdentitySkipsWhenPreSanitizationHadToolIntent(t *testing.T) {
-	// Identity layer must not invent tools after the sanitizer stripped unsupported ones.
-	patchedBody := []byte(`{"model":"grok-4.5","input":"hello"}`)
-	body, err := applyGrokResponsesCacheIdentity(patchedBody, []byte(`{"model":"grok","tools":[{"type":"namespace","name":"client_tools"}]}`), "isolated-id", true)
-	require.NoError(t, err)
-	require.Equal(t, "isolated-id", gjson.GetBytes(body, "prompt_cache_key").String())
-	require.False(t, gjson.GetBytes(body, "tools").Exists())
-	require.False(t, gjson.GetBytes(body, "tool_choice").Exists())
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// This is the shape apply receives after patchGrokResponsesBody has
+			// removed unsupported tools and their associated tool_choice.
+			patchedBody := []byte(`{"model":"grok-4.5","input":"hello"}`)
+			body, err := applyGrokResponsesCacheIdentity(patchedBody, []byte(tt.intentBody), "isolated-id", true)
 
-func TestGrokFreeRouteInjectsAfterUnsupportedToolsSanitized(t *testing.T) {
-	// Free path still ensures search on the post-sanitizer body.
-	account := healthyGrokOAuthGatewayTestAccount(917, "access-token")
-	account.Credentials["subscription_tier"] = "free"
-	patchedBody := []byte(`{"model":"grok-4.5","input":"hello"}`)
-	intent := []byte(`{"model":"grok","tools":[{"type":"namespace","name":"client_tools"}]}`)
-	body, err := applyGrokFreeMessagesFunctionToolCacheRoute(patchedBody, intent, account, "isolated-id")
-	require.NoError(t, err)
-	require.Equal(t, "web_search", gjson.GetBytes(body, "tools.0.type").String())
-	require.Equal(t, "x_search", gjson.GetBytes(body, "tools.1.type").String())
+			require.NoError(t, err)
+			require.Equal(t, "isolated-id", gjson.GetBytes(body, "prompt_cache_key").String())
+			require.False(t, gjson.GetBytes(body, "tools").Exists())
+			require.False(t, gjson.GetBytes(body, "tool_choice").Exists())
+		})
+	}
 }
 
 func TestApplyGrokCacheIdentityWithoutFreeTierRoutingOnlyWritesIdentity(t *testing.T) {
@@ -1121,8 +1076,7 @@ func TestGrokCompactRequestSkipsCacheIdentityAndNativeTools(t *testing.T) {
 	body := []byte(`{"model":"grok","input":"compact this","prompt_cache_key":"raw-client-key"}`)
 
 	identity := resolveGrokCacheIdentity(c, body, "", "grok-4.5")
-	// Production gates Free injection off for compact because tool_choice is rejected.
-	patched, err := applyGrokResponsesCacheIdentity(body, body, identity, false)
+	patched, err := applyGrokResponsesCacheIdentity(body, body, identity, true)
 
 	require.NoError(t, err)
 	require.Empty(t, identity)
