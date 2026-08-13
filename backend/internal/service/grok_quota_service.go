@@ -186,6 +186,7 @@ func (s *GrokQuotaService) probeUsage(ctx context.Context, accountID int64) (*Gr
 	probeBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	snapshot := xai.ObserveQuotaHeaders(resp.Header, resp.StatusCode, "active_probe")
 	markGrokFreeUsageExhaustedSnapshot(snapshot, probeBody, now)
+	stampGrokQuotaSnapshotForPlan(account, snapshot, probeModel)
 	resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, now)
 	if limited {
 		normalizeGrokExhaustedWindowResets(snapshot, resetAt, now)
