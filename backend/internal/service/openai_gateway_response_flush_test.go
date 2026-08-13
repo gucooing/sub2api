@@ -228,6 +228,54 @@ func TestOpenAIResponseFlush_BurstDoesNotIncreaseFlushes(t *testing.T) {
 	require.Equal(t, first+burst, flushes[1])
 }
 
+func TestGrokResponseFlush_BurstFlushesEverySSEEvent(t *testing.T) {
+	created := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_grok\"}}\n\n"
+	reasoning := "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking\"}\n\n"
+	events := []string{
+		created,
+		reasoning,
+		": upstream-note\n\n",
+		"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"in_progress\"}}\n\n",
+		"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"web_search\"}}\n\n",
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call_1\",\"delta\":\"{}\"}\n\n",
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n",
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_grok\",\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"thinking\"}]},{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"Grok Build\"}},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]},{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"web_search\",\"arguments\":\"{}\"}]}}\n\n",
+	}
+	burst := strings.Join(events[2:], "")
+	allowBurst := make(chan struct{})
+	eofReached := make(chan struct{})
+	reader := &stagedOpenAISSEReadCloser{
+		segments:   [][]byte{[]byte(created), []byte(reasoning), []byte(burst)},
+		gates:      []<-chan struct{}{nil, nil, allowBurst},
+		eofReached: eofReached,
+	}
+	releaseFirstFlush := make(chan struct{})
+	recorder := newOpenAIResponseFlushRecorder()
+	recorder.blockFlush = 1
+	recorder.flushBlocked = make(chan struct{})
+	recorder.releaseFlush = releaseFirstFlush
+	resultCh, errCh := runOpenAIResponseFlushTestAsyncForAccount(
+		recorder,
+		reader,
+		config.GatewayConfig{StreamDataIntervalTimeout: 30},
+		&Account{ID: 1, Platform: PlatformGrok},
+	)
+
+	waitOpenAIResponseFlushSignal(t, recorder.flushBlocked)
+	close(allowBurst)
+	waitOpenAIResponseFlushSignal(t, eofReached)
+	close(releaseFirstFlush)
+
+	require.NoError(t, <-errCh)
+	require.NotNil(t, <-resultCh)
+	gotBody, flushes := recorder.snapshot()
+	require.Equal(t, strings.Join(events, ""), gotBody)
+	require.Len(t, flushes, len(events), "Grok reasoning and tool events must be flushed one event at a time")
+	for _, flushed := range flushes {
+		require.True(t, strings.HasSuffix(flushed, "\n\n"), "flush must occur at a complete SSE event boundary")
+	}
+}
+
 func TestOpenAIResponseFlush_CommentAndEOFOnlyFlushCompleteResidual(t *testing.T) {
 	body := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n" +
 		": upstream-comment\n\n" +
@@ -471,6 +519,10 @@ func TestOpenAIResponseFlush_ClientDisconnectStillDrainsUsage(t *testing.T) {
 }
 
 func runOpenAIResponseFlushTest(recorder *openAIResponseFlushRecorder, body io.ReadCloser, gatewayCfg config.GatewayConfig) (*openaiStreamingResult, error) {
+	return runOpenAIResponseFlushTestForAccount(recorder, body, gatewayCfg, &Account{ID: 1, Platform: PlatformOpenAI})
+}
+
+func runOpenAIResponseFlushTestForAccount(recorder *openAIResponseFlushRecorder, body io.ReadCloser, gatewayCfg config.GatewayConfig, account *Account) (*openaiStreamingResult, error) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
@@ -483,14 +535,18 @@ func runOpenAIResponseFlushTest(recorder *openAIResponseFlushRecorder, body io.R
 		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 		Body:       body,
 	}
-	return svc.handleStreamingResponse(context.Background(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI}, time.Now(), "gpt-5", "gpt-5")
+	return svc.handleStreamingResponse(context.Background(), resp, c, account, time.Now(), "gpt-5", "gpt-5")
 }
 
 func runOpenAIResponseFlushTestAsync(recorder *openAIResponseFlushRecorder, body io.ReadCloser, gatewayCfg config.GatewayConfig) (<-chan *openaiStreamingResult, <-chan error) {
+	return runOpenAIResponseFlushTestAsyncForAccount(recorder, body, gatewayCfg, &Account{ID: 1, Platform: PlatformOpenAI})
+}
+
+func runOpenAIResponseFlushTestAsyncForAccount(recorder *openAIResponseFlushRecorder, body io.ReadCloser, gatewayCfg config.GatewayConfig, account *Account) (<-chan *openaiStreamingResult, <-chan error) {
 	resultCh := make(chan *openaiStreamingResult, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, err := runOpenAIResponseFlushTest(recorder, body, gatewayCfg)
+		result, err := runOpenAIResponseFlushTestForAccount(recorder, body, gatewayCfg, account)
 		resultCh <- result
 		errCh <- err
 	}()

@@ -1241,7 +1241,13 @@ func buildGrokResponsesRequest(ctx context.Context, c *gin.Context, account *Acc
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
+	if gjson.GetBytes(body, "stream").Bool() {
+		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("Accept-Encoding", "identity")
+	} else {
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Accept-Encoding", "gzip")
+	}
 	if account.IsGrokOAuth() {
 		applyGrokCLIHeaders(req.Header)
 	}

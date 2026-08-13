@@ -232,6 +232,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	responsesSemanticOutputSeen := false
 	failedMessage := ""
 	clientOutputStarted := false
+	// Grok Build emits reasoning and tool lifecycle updates as ordinary
+	// Responses SSE events. The idle-timeout scanner reads upstream on a
+	// goroutine, so queue drain cannot be the only flush signal: a burst can
+	// otherwise remain buffered until the model finishes. Flush each complete
+	// Grok event at its SSE boundary.
+	flushEveryEvent := account != nil && account.Platform == PlatformGrok
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	var streamEarlyErr error
 	eventInProgress := false
@@ -257,7 +263,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	completeGuardedEvent := func(queueDrained bool) {
 		completedProgressEvent := eventStartsClientOutput
 		completedVisibleEvent := eventStartsVisibleOutput
-		shouldFlush := eventShouldFlush || (queueDrained && clientOutputStarted)
+		shouldFlush := eventShouldFlush || (flushEveryEvent && eventInProgress) || (queueDrained && clientOutputStarted)
 		eventInProgress = false
 		if !clientDisconnected {
 			if completedProgressEvent {
@@ -570,7 +576,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 
 			// 写入客户端（客户端断开后继续 drain 上游）
 			if !clientDisconnected {
-				shouldFlush := queueDrained && (clientOutputStarted || startsClientOutput)
+				shouldFlush := flushEveryEvent || (queueDrained && (clientOutputStarted || startsClientOutput))
 				if firstTokenMs == nil && startsVisibleOutput {
 					// 保证首个 token 事件尽快出站，避免影响 TTFT。
 					shouldFlush = true
@@ -611,7 +617,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		// or queue-drain flush must never split an open SSE event.
 		shouldFlush := false
 		if line == "" {
-			shouldFlush = eventShouldFlush || (queueDrained && clientOutputStarted)
+			shouldFlush = eventShouldFlush || (flushEveryEvent && eventInProgress) || (queueDrained && clientOutputStarted)
 			eventShouldFlush = false
 		}
 		if !clientDisconnected {
