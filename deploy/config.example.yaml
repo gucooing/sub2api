@@ -1147,12 +1147,12 @@ rate_limit:
 # 定价数据源（可选）
 # =============================================================================
 pricing:
-  # URL to fetch model pricing data (default: pinned model-price-repo commit)
-  # 获取模型定价数据的 URL（默认：固定 commit 的 model-price-repo）
-  remote_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/refs/heads/main//model_prices_and_context_window.json"
+  # URL to fetch model pricing data from this repository
+  # 从当前仓库获取模型定价数据的 URL
+  remote_url: "https://raw.githubusercontent.com/gucooing/sub2api/main/backend/resources/model-pricing/model_prices_and_context_window.json"
   # Hash verification URL (optional)
   # 哈希校验 URL（可选）
-  hash_url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/refs/heads/main//model_prices_and_context_window.sha256"
+  hash_url: "https://raw.githubusercontent.com/gucooing/sub2api/main/backend/resources/model-pricing/model_prices_and_context_window.sha256"
   # Local data directory for caching
   # 本地数据缓存目录
   data_dir: "./data"
