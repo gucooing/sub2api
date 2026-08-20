@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 20 // v20: multi-group unavailability/sticky pin + AllowLive + reasoning effort + group profit control fields (force refresh of v19 snapshots without profit fields)
+const apiKeyAuthSnapshotVersion = 20 // v20: multi-group unavailability/sticky pin + AllowLive + reasoning effort + group profit control, long-context, and model pricing fields
 
 // DefaultKeyGroupUnavailabilityTTL is how long this key skips a group after zero-available.
 const DefaultKeyGroupUnavailabilityTTL = 2 * time.Minute
@@ -368,6 +368,8 @@ func groupToAuthSnapshot(g *Group) *APIKeyAuthGroupSnapshot {
 		AudioRealtimePricePerMin:        g.AudioRealtimePricePerMin,
 		AudioTTSPricePerMillionChars:    g.AudioTTSPricePerMillionChars,
 		AudioSTTPricePerHour:            g.AudioSTTPricePerHour,
+		LongContextPricingEnabled:       g.LongContextPricingEnabled,
+		ModelPricing:                    g.ModelPricing,
 		ClaudeCodeOnly:                  g.ClaudeCodeOnly,
 		FallbackGroupID:                 g.FallbackGroupID,
 		FallbackGroupIDOnInvalidRequest: g.FallbackGroupIDOnInvalidRequest,
@@ -427,6 +429,8 @@ func authGroupSnapshotToGroup(g *APIKeyAuthGroupSnapshot) *Group {
 		AudioRealtimePricePerMin:        g.AudioRealtimePricePerMin,
 		AudioTTSPricePerMillionChars:    g.AudioTTSPricePerMillionChars,
 		AudioSTTPricePerHour:            g.AudioSTTPricePerHour,
+		LongContextPricingEnabled:       g.LongContextPricingEnabled,
+		ModelPricing:                    g.ModelPricing,
 		ClaudeCodeOnly:                  g.ClaudeCodeOnly,
 		FallbackGroupID:                 g.FallbackGroupID,
 		FallbackGroupIDOnInvalidRequest: g.FallbackGroupIDOnInvalidRequest,
