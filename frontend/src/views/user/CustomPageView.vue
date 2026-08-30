@@ -1,7 +1,28 @@
 <template>
   <AppLayout>
-    <div class="custom-page-layout">
-      <div class="card flex-1 min-h-0 overflow-hidden">
+    <div
+      class="custom-page-layout"
+      :class="{ 'custom-page-layout--embed': isEmbedMode }"
+    >
+      <!-- Iframe embed: fill the menu content area, no outer card/shell -->
+      <div v-if="isEmbedMode" class="custom-embed">
+        <a
+          :href="embeddedUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="btn btn-secondary btn-sm custom-open-fab"
+        >
+          <Icon name="externalLink" size="sm" class="mr-1.5" :stroke-width="2" />
+          {{ t('customPage.openInNewTab') }}
+        </a>
+        <iframe
+          :src="embeddedUrl"
+          class="custom-embed-frame"
+          allowfullscreen
+        ></iframe>
+      </div>
+
+      <div v-else class="card flex-1 min-h-0 overflow-hidden">
         <div v-if="loading" class="flex h-full items-center justify-center py-12">
           <div
             class="h-8 w-8 animate-spin rounded-full border-2 border-primary-500 border-t-transparent"
@@ -76,8 +97,8 @@
           ></div>
         </div>
 
-        <!-- URL not configured -->
-        <div v-else-if="!isValidUrl" class="flex h-full items-center justify-center p-10 text-center">
+        <!-- URL not configured / invalid -->
+        <div v-else class="flex h-full items-center justify-center p-10 text-center">
           <div class="max-w-md">
             <div
               class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-gray-100 dark:bg-dark-700"
@@ -91,24 +112,6 @@
               {{ t('customPage.notConfiguredDesc') }}
             </p>
           </div>
-        </div>
-
-        <!-- Iframe embed mode -->
-        <div v-else class="custom-embed-shell">
-          <a
-            :href="embeddedUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="btn btn-secondary btn-sm custom-open-fab"
-          >
-            <Icon name="externalLink" size="sm" class="mr-1.5" :stroke-width="2" />
-            {{ t('customPage.openInNewTab') }}
-          </a>
-          <iframe
-            :src="embeddedUrl"
-            class="custom-embed-frame"
-            allowfullscreen
-          ></iframe>
         </div>
       </div>
     </div>
@@ -189,6 +192,9 @@ const isValidUrl = computed(() => {
   const url = embeddedUrl.value
   return url.startsWith('http://') || url.startsWith('https://')
 })
+
+/** True when we can render a full-bleed iframe (no card shell). */
+const isEmbedMode = computed(() => !!menuItem.value && !isMarkdownMode.value && isValidUrl.value)
 
 function generateHeadingId(text: string, index: number): string {
   const base = text
@@ -379,6 +385,27 @@ onUnmounted(() => {
   height: calc(100vh - 64px - 4rem);
 }
 
+/* Cancel AppLayout main padding so the iframe fills the menu content area */
+.custom-page-layout--embed {
+  height: calc(100vh - 64px);
+  margin: -1rem;
+  width: calc(100% + 2rem);
+}
+
+@media (min-width: 768px) {
+  .custom-page-layout--embed {
+    margin: -1.5rem;
+    width: calc(100% + 3rem);
+  }
+}
+
+@media (min-width: 1024px) {
+  .custom-page-layout--embed {
+    margin: -2rem;
+    width: calc(100% + 4rem);
+  }
+}
+
 .toc-sidebar {
   @apply flex flex-col h-full border-r border-gray-200 dark:border-dark-600 bg-gray-50 dark:bg-dark-800;
   width: min(240px, 30%);
@@ -437,11 +464,8 @@ onUnmounted(() => {
   @apply shadow-sm transition-colors cursor-pointer;
 }
 
-.custom-embed-shell {
-  @apply relative;
-  @apply h-full w-full overflow-hidden rounded-2xl;
-  @apply bg-gradient-to-b from-gray-50 to-white dark:from-dark-900 dark:to-dark-950;
-  @apply p-0;
+.custom-embed {
+  @apply relative h-full w-full min-h-0 overflow-hidden;
 }
 
 .custom-open-fab {

@@ -8,7 +8,10 @@
       </div>
 
       <template v-else-if="detail">
-        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div
+          class="grid gap-4 sm:grid-cols-2"
+          :class="showInviteBonus ? 'lg:grid-cols-5' : 'lg:grid-cols-4'"
+        >
           <div class="card p-5">
             <p class="flex items-center gap-1.5 text-sm text-gray-500 dark:text-dark-400">
               <Icon name="dollar" size="sm" class="text-primary-500" />
@@ -19,6 +22,15 @@
             </p>
             <p class="mt-1 text-xs text-gray-400 dark:text-dark-500">
               {{ t('affiliate.stats.rebateRateHint') }}
+            </p>
+          </div>
+          <div v-if="showInviteBonus" class="card p-5">
+            <p class="text-sm text-gray-500 dark:text-dark-400">{{ t('affiliate.stats.inviteBonus') }}</p>
+            <p class="mt-2 text-2xl font-semibold text-primary-600 dark:text-primary-400">
+              {{ formatCurrency(detail.invite_bonus) }}
+            </p>
+            <p class="mt-1 text-xs text-gray-400 dark:text-dark-500">
+              {{ t('affiliate.stats.inviteBonusHint') }}
             </p>
           </div>
           <div class="card p-5">
@@ -77,8 +89,13 @@
             <ul class="mt-2 space-y-1 text-sm text-primary-700 dark:text-primary-300">
               <li>1. {{ t('affiliate.tips.line1') }}</li>
               <li>2. {{ t('affiliate.tips.line2', { rate: `${formattedRebateRate}%` }) }}</li>
-              <li>3. {{ t('affiliate.tips.line3') }}</li>
-              <li v-if="detail.aff_frozen_quota > 0">4. {{ t('affiliate.tips.line4') }}</li>
+              <li v-if="showInviteBonus">
+                3. {{ t('affiliate.tips.lineInviteBonus', { amount: formatCurrency(detail.invite_bonus) }) }}
+              </li>
+              <li>{{ showInviteBonus ? '4.' : '3.' }} {{ t('affiliate.tips.line3') }}</li>
+              <li v-if="detail.aff_frozen_quota > 0">
+                {{ showInviteBonus ? '5.' : '4.' }} {{ t('affiliate.tips.line4') }}
+              </li>
             </ul>
           </div>
         </div>
@@ -173,6 +190,11 @@ const formattedRebateRate = computed(() => {
   const v = detail.value?.effective_rebate_rate_percent ?? 0
   const rounded = Math.round(v * 100) / 100
   return Number.isInteger(rounded) ? String(rounded) : rounded.toString()
+})
+
+const showInviteBonus = computed(() => {
+  const bonus = detail.value?.invite_bonus ?? 0
+  return typeof bonus === 'number' && Number.isFinite(bonus) && bonus > 0
 })
 
 function formatCount(value: number): string {
