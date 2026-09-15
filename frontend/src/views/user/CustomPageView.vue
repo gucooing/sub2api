@@ -7,6 +7,7 @@
       <!-- Iframe embed: fill the menu content area, no outer card/shell -->
       <div v-if="isEmbedMode" ref="embedShell" class="custom-embed-shell">
         <a
+          v-if="!menuItem?.hide_open_button"
           ref="openButton"
           :href="embeddedUrl"
           target="_blank"

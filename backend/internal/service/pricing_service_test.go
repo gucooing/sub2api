@@ -228,19 +228,19 @@ const gpt56LadderCatalogJSON = `{
 		"output_cost_per_token_above_272k_tokens": 4.5e-05,
 		"cache_read_input_token_cost_above_272k_tokens": 1e-06},
 	"gpt-5.6-terra": {"litellm_provider": "openai", "mode": "chat",
-		"input_cost_per_token": 2e-06, "input_cost_per_token_priority": 4e-06,
-		"output_cost_per_token": 1.2e-05, "output_cost_per_token_priority": 2.4e-05,
-		"cache_read_input_token_cost": 2e-07, "cache_read_input_token_cost_priority": 4e-07,
-		"input_cost_per_token_above_272k_tokens": 4e-06,
-		"output_cost_per_token_above_272k_tokens": 1.8e-05,
-		"cache_read_input_token_cost_above_272k_tokens": 4e-07},
+		"input_cost_per_token": 2.5e-06, "input_cost_per_token_priority": 5e-06,
+		"output_cost_per_token": 1.5e-05, "output_cost_per_token_priority": 3e-05,
+		"cache_read_input_token_cost": 2.5e-07, "cache_read_input_token_cost_priority": 5e-07,
+		"input_cost_per_token_above_272k_tokens": 5e-06,
+		"output_cost_per_token_above_272k_tokens": 2.25e-05,
+		"cache_read_input_token_cost_above_272k_tokens": 5e-07},
 	"gpt-5.6-luna": {"litellm_provider": "openai", "mode": "chat",
-		"input_cost_per_token": 2e-07, "input_cost_per_token_priority": 4e-07,
-		"output_cost_per_token": 1.2e-06, "output_cost_per_token_priority": 2.4e-06,
-		"cache_read_input_token_cost": 2e-08, "cache_read_input_token_cost_priority": 4e-08,
-		"input_cost_per_token_above_272k_tokens": 4e-07,
-		"output_cost_per_token_above_272k_tokens": 1.8e-06,
-		"cache_read_input_token_cost_above_272k_tokens": 4e-08}
+		"input_cost_per_token": 1e-06, "input_cost_per_token_priority": 2e-06,
+		"output_cost_per_token": 6e-06, "output_cost_per_token_priority": 1.2e-05,
+		"cache_read_input_token_cost": 1e-07, "cache_read_input_token_cost_priority": 2e-07,
+		"input_cost_per_token_above_272k_tokens": 2e-06,
+		"output_cost_per_token_above_272k_tokens": 9e-06,
+		"cache_read_input_token_cost_above_272k_tokens": 2e-07}
 }`
 
 func TestBillingService_GPT56UsesLongContextPricingAcrossModelsAndTiers(t *testing.T) {
@@ -617,6 +617,96 @@ func TestBillingService_Gemini36FlashThinkingTierFallbacksAreBillable(t *testing
 			require.InDelta(t, 7.5, cost.OutputCost, 1e-12)
 			require.InDelta(t, 0.15, cost.CacheReadCost, 1e-12)
 			require.InDelta(t, 9.15, cost.TotalCost, 1e-12)
+		})
+	}
+}
+
+func TestPricingService_Gemini37FlashThinkingTiersUseBasePricing(t *testing.T) {
+	basePricing := &LiteLLMModelPricing{
+		InputCostPerToken:       0.75e-6,
+		OutputCostPerToken:      3.75e-6,
+		CacheReadInputTokenCost: 0.075e-6,
+	}
+	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+		"gemini-3.7-flash": basePricing,
+	}}
+
+	for _, model := range []string{
+		"gemini-3.7-flash",
+		"gemini-3.7-flash-high",
+		"gemini-3.7-flash-low",
+		"gemini-3.7-flash-medium",
+		"gemini-3.7-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			require.Same(t, basePricing, svc.GetModelPricing(model))
+		})
+	}
+}
+
+func TestBillingService_Gemini37FlashThinkingTierFallbacksAreBillable(t *testing.T) {
+	svc := NewBillingService(&config.Config{}, nil)
+	tokens := UsageTokens{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000}
+
+	for _, model := range []string{
+		"gemini-3.7-flash",
+		"gemini-3.7-flash-high",
+		"gemini-3.7-flash-low",
+		"gemini-3.7-flash-medium",
+		"gemini-3.7-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			cost, err := svc.CalculateCost(model, tokens, 1)
+			require.NoError(t, err)
+			require.InDelta(t, 0.75, cost.InputCost, 1e-12)
+			require.InDelta(t, 3.75, cost.OutputCost, 1e-12)
+			require.InDelta(t, 0.075, cost.CacheReadCost, 1e-12)
+			require.InDelta(t, 4.575, cost.TotalCost, 1e-12)
+		})
+	}
+}
+
+func TestPricingService_Gemini38FlashThinkingTiersUseBasePricing(t *testing.T) {
+	basePricing := &LiteLLMModelPricing{
+		InputCostPerToken:       0.75e-6,
+		OutputCostPerToken:      3.75e-6,
+		CacheReadInputTokenCost: 0.075e-6,
+	}
+	svc := &PricingService{pricingData: map[string]*LiteLLMModelPricing{
+		"gemini-3.8-flash": basePricing,
+	}}
+
+	for _, model := range []string{
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-low",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			require.Same(t, basePricing, svc.GetModelPricing(model))
+		})
+	}
+}
+
+func TestBillingService_Gemini38FlashThinkingTierFallbacksAreBillable(t *testing.T) {
+	svc := NewBillingService(&config.Config{}, nil)
+	tokens := UsageTokens{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000}
+
+	for _, model := range []string{
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-high",
+		"gemini-3.8-flash-low",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-tiered",
+	} {
+		t.Run(model, func(t *testing.T) {
+			cost, err := svc.CalculateCost(model, tokens, 1)
+			require.NoError(t, err)
+			require.InDelta(t, 0.75, cost.InputCost, 1e-12)
+			require.InDelta(t, 3.75, cost.OutputCost, 1e-12)
+			require.InDelta(t, 0.075, cost.CacheReadCost, 1e-12)
+			require.InDelta(t, 4.575, cost.TotalCost, 1e-12)
 		})
 	}
 }

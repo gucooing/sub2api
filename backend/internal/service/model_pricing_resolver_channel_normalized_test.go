@@ -4,11 +4,11 @@ package service
 
 // issue #5256 回归测试：使用记录的费用统计没有按照渠道定价的价格进行计算。
 //
-// 场景：管理员在渠道定价把 gpt-5.6-luna 的输入价从官方 $0.2/M 调成 $0.4/M。
+// 场景：管理员在渠道定价把 gpt-5.6-luna 的输入价从本仓库兜底 $1.0/M 调成 $0.4/M。
 // 当请求模型带 effort 后缀（gpt-5.6-luna-high）而渠道只配了基名时，渠道定价查找
 // 用字面名未命中，官方兜底价却会把后缀名归一化到 gpt-5.6-luna 并命中静态价
 // （pricing_service.go 的 gpt-5.6-luna 前缀分支），计费候选循环首个成功即返回
-// → 落库的是官方 0.2 而不是渠道 0.4。
+// → 落库的是兜底 1.0 而不是渠道 0.4。
 //
 // 测试走与生产一致的 populateChannelCache → OpenAIGatewayService.RecordUsage 路径，
 // 断言落库 UsageLog 的 InputCost。
@@ -24,7 +24,7 @@ import (
 const (
 	// 1M 输入 token 下，渠道价与官方兜底价的期望费用（USD）
 	channelPricingExpectedChannelCost  = 0.4
-	channelPricingExpectedOfficialCost = 0.2
+	channelPricingExpectedOfficialCost = 1.0
 	// 用于验证「不相关的渠道配置不会被误命中」的对照价
 	channelPricingUnrelatedCost = 0.9
 )
@@ -112,7 +112,7 @@ func TestChannelPricing_ExactModelMatch(t *testing.T) {
 }
 
 // issue #5256 主回归：请求模型带 effort 后缀、渠道只配基名（无通配符）→ 仍应按渠道价计。
-// 修复前此处得到 0.2（官方兜底价）。
+// 修复前此处得到 1.0（本仓库兜底价）。
 func TestChannelPricing_SuffixedModelUsesNormalizedChannelPricing(t *testing.T) {
 	log := recordUsageWithChannelPricing(t, "gpt-5.6-luna-high", false, []ChannelModelPricing{
 		tokenPricingForModels([]string{"gpt-5.6-luna"}, channelPricingExpectedChannelCost),
