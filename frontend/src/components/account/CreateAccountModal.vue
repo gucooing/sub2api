@@ -2297,6 +2297,11 @@
         </div>
       </div>
 
+      <OpenAIOAuthEndpointsFields
+        v-if="form.platform === 'openai' && isOAuthFlow"
+        v-model="openaiOAuthEndpoints"
+      />
+
       <!-- OpenAI OAuth Model Mapping (OAuth 类型没有 apikey 容器，需要独立的模型映射区域) -->
       <div
         v-if="(form.platform === 'openai' || form.platform === 'grok') && isOAuthFlow"
@@ -3886,6 +3891,9 @@
 </template>
 
 <script setup lang="ts">
+import OpenAIOAuthEndpointsFields from './OpenAIOAuthEndpointsFields.vue'
+import { OPENAI_OAUTH_ENDPOINT_DEFAULTS, buildOpenAIOAuthEndpoints, type OpenAIOAuthEndpoints } from './openaiOAuthEndpoints'
+
 import { ref, reactive, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -4090,6 +4098,7 @@ const hideAccountLongContextBilling = computed(() => {
 
 // OAuth composables
 const oauth = useAccountOAuth() // For Anthropic OAuth
+const openaiOAuthEndpoints = ref<OpenAIOAuthEndpoints>({ ...OPENAI_OAUTH_ENDPOINT_DEFAULTS })
 const openaiOAuth = useOpenAIOAuth() // For OpenAI OAuth
 const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
@@ -5292,6 +5301,7 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
 
 // Methods
 const resetForm = () => {
+  openaiOAuthEndpoints.value = { ...OPENAI_OAUTH_ENDPOINT_DEFAULTS }
   step.value = 1
   form.name = ''
   form.notes = ''
@@ -5888,7 +5898,7 @@ const goBackToBasicInfo = () => {
 
 const handleGenerateUrl = async () => {
   if (form.platform === 'openai') {
-    await openaiOAuth.generateAuthUrl(form.proxy_id)
+    await openaiOAuth.generateAuthUrl(form.proxy_id, undefined, buildOpenAIOAuthEndpoints(openaiOAuthEndpoints.value))
   } else if (form.platform === 'gemini') {
     await geminiOAuth.generateAuthUrl(
       form.proxy_id,
@@ -6363,7 +6373,8 @@ const handleOpenAIExchange = async (authCode: string) => {
 const OPENAI_MOBILE_RT_CLIENT_ID = 'app_LlGpXReQgckcGGUo2JrYvtJK'
 
 const buildOpenAICodexImportCredentialExtras = (): Record<string, unknown> | null => {
-  const credentials: Record<string, unknown> = {}
+  const endpoints = buildOpenAIOAuthEndpoints(openaiOAuthEndpoints.value)
+  const credentials: Record<string, unknown> = endpoints ? { oauth_endpoints: endpoints } : {}
   if (!isOpenAIModelRestrictionDisabled.value) {
     const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
     if (modelMapping) {
@@ -6575,7 +6586,8 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
         const tokenInfo = await oauthClient.validateRefreshToken(
           refreshTokens[i],
           form.proxy_id,
-          clientId
+          clientId,
+          buildOpenAIOAuthEndpoints(openaiOAuthEndpoints.value)
         )
         if (!tokenInfo) {
           failedCount++

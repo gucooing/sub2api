@@ -1636,7 +1636,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		clientVersion = CodexCanonicalClientVersion()
 	}
 
-	requestEndpoint := chatgptCodexModelsURL
+	requestEndpoint := credAccount.OpenAIOAuthURL(chatgptCodexModelsURL)
 	authToken := ""
 	useAPIKeyUpstream := false
 	appendModelsPath := false

@@ -32,6 +32,21 @@ vi.mock('@/api/admin', () => ({
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { adminAPI } from '@/api/admin'
 
+describe('useOpenAIOAuth custom endpoints', () => {
+  const endpoints = { auth_base_url: 'http://auth.example/relay', chatgpt_base_url: 'http://chat.example' }
+
+  it('sends endpoints before authorization and refresh-token validation', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockResolvedValueOnce({ auth_url: 'http://auth.example/relay/oauth/authorize?state=abc', session_id: 'session' })
+    vi.mocked(adminAPI.accounts.refreshOpenAIToken).mockResolvedValueOnce({ access_token: 'at', oauth_endpoints: endpoints })
+    const oauth = useOpenAIOAuth()
+    expect(await oauth.generateAuthUrl(undefined, undefined, endpoints)).toBe(true)
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenLastCalledWith('/admin/openai/generate-auth-url', { oauth_endpoints: endpoints })
+    const token = await oauth.validateRefreshToken('rt', undefined, undefined, endpoints)
+    expect(adminAPI.accounts.refreshOpenAIToken).toHaveBeenLastCalledWith('rt', undefined, '/admin/openai/refresh-token', undefined, endpoints)
+    expect(oauth.buildCredentials(token!)).toMatchObject({ oauth_endpoints: endpoints })
+  })
+})
+
 describe('useOpenAIOAuth.buildCredentials', () => {
   it('should keep client_id when token response contains it', () => {
     const oauth = useOpenAIOAuth()

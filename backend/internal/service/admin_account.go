@@ -474,6 +474,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if err := validateOpenAIOAuthEndpointCredentials(input.Platform, input.Type, input.Credentials, s.cfg); err != nil {
+		return nil, err
+	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
 		return nil, err
@@ -654,6 +657,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。
+	if err := validateOpenAIOAuthEndpointCredentials(account.Platform, account.Type, account.Credentials, s.cfg); err != nil {
+		return nil, err
+	}
 	requestedProbeEnabledUpdate := input.ProbeEnabled
 	requestedRateSyncEnabledUpdate := input.RateSyncEnabled
 	if input.Extra != nil {
@@ -1007,6 +1013,11 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	// UpdateAccount 守卫对齐)。覆盖显式 IDs 与 filter 解析出的 IDs(此处 AccountIDs 已解析完成)。
 	if len(input.Credentials) > 0 {
 		for _, acc := range cachedTargets {
+			if acc != nil {
+				if err := validateOpenAIOAuthEndpointCredentials(acc.Platform, acc.Type, input.Credentials, s.cfg); err != nil {
+					return nil, err
+				}
+			}
 			if acc != nil && acc.IsCredentialShadow() {
 				return nil, infraerrors.Newf(http.StatusBadRequest, "SPARK_SHADOW_NO_CREDENTIALS",
 					"spark shadow account %d cannot hold credentials; manage credentials on the parent account", acc.ID)
@@ -1659,7 +1670,7 @@ func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Acc
 		}
 	}
 
-	mode := disableOpenAITraining(ctx, s.privacyClientFactory, token, proxyURL)
+	mode := disableOpenAITraining(ctx, s.privacyClientFactory, token, proxyURL, account.OpenAIOAuthEndpoints())
 	if mode == "" {
 		return ""
 	}
@@ -1693,7 +1704,7 @@ func (s *adminServiceImpl) ForceOpenAIPrivacy(ctx context.Context, account *Acco
 		}
 	}
 
-	mode := disableOpenAITraining(ctx, s.privacyClientFactory, token, proxyURL)
+	mode := disableOpenAITraining(ctx, s.privacyClientFactory, token, proxyURL, account.OpenAIOAuthEndpoints())
 	if mode == "" {
 		return ""
 	}

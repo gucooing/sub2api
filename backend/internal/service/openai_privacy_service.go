@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/imroc/req/v3"
 )
 
@@ -37,7 +38,7 @@ func shouldSkipOpenAIPrivacyEnsure(extra map[string]any) bool {
 
 // disableOpenAITraining calls ChatGPT settings API to turn off "Improve the model for everyone".
 // Returns privacy_mode value: "training_off" on success, "cf_blocked" / "failed" on failure.
-func disableOpenAITraining(ctx context.Context, clientFactory PrivacyClientFactory, accessToken, proxyURL string) string {
+func disableOpenAITraining(ctx context.Context, clientFactory PrivacyClientFactory, accessToken, proxyURL string, endpoints ...openai.OAuthEndpoints) string {
 	if accessToken == "" || clientFactory == nil {
 		return ""
 	}
@@ -62,7 +63,7 @@ func disableOpenAITraining(ctx context.Context, clientFactory PrivacyClientFacto
 		SetHeader("sec-fetch-dest", "empty").
 		SetQueryParam("feature", "training_allowed").
 		SetQueryParam("value", "false").
-		Patch(openAISettingsURL)
+		Patch(openai.FirstOAuthEndpoints(endpoints).Rewrite(openAISettingsURL))
 
 	if err != nil {
 		slog.Warn("openai_privacy_request_error", "error", err.Error())
@@ -115,7 +116,7 @@ var (
 // Used as fallback when id_token doesn't contain these fields (e.g., Mobile RT).
 // orgID is used to match the correct account when multiple accounts exist (e.g., personal + team).
 // Returns nil on any failure (best-effort, non-blocking).
-func fetchChatGPTAccountInfo(ctx context.Context, clientFactory PrivacyClientFactory, accessToken, proxyURL, orgID string) *ChatGPTAccountInfo {
+func fetchChatGPTAccountInfo(ctx context.Context, clientFactory PrivacyClientFactory, accessToken, proxyURL, orgID string, endpoints ...openai.OAuthEndpoints) *ChatGPTAccountInfo {
 	if accessToken == "" || clientFactory == nil {
 		return nil
 	}
@@ -137,7 +138,7 @@ func fetchChatGPTAccountInfo(ctx context.Context, clientFactory PrivacyClientFac
 		SetHeader("Referer", "https://chatgpt.com/").
 		SetHeader("Accept", "application/json").
 		SetSuccessResult(&result).
-		Get(chatGPTAccountsCheckURL)
+		Get(openai.FirstOAuthEndpoints(endpoints).Rewrite(chatGPTAccountsCheckURL))
 
 	if err != nil {
 		slog.Warn("chatgpt_account_check_request_error", "error", err.Error())
@@ -225,7 +226,7 @@ func fetchChatGPTAccountInfo(ctx context.Context, clientFactory PrivacyClientFac
 // fetchChatGPTSubscriptionExpiresAt reads the lightweight subscription endpoint used by
 // ChatGPT/Codex clients. Some Plus accounts no longer expose entitlement.expires_at in
 // accounts/check, but this endpoint still returns active_until.
-func fetchChatGPTSubscriptionExpiresAt(ctx context.Context, clientFactory PrivacyClientFactory, accessToken, proxyURL, accountID string) string {
+func fetchChatGPTSubscriptionExpiresAt(ctx context.Context, clientFactory PrivacyClientFactory, accessToken, proxyURL, accountID string, endpoints ...openai.OAuthEndpoints) string {
 	accountID = strings.TrimSpace(accountID)
 	if accessToken == "" || accountID == "" || clientFactory == nil {
 		return ""
@@ -254,7 +255,7 @@ func fetchChatGPTSubscriptionExpiresAt(ctx context.Context, clientFactory Privac
 		SetHeader("Accept", "application/json").
 		SetSuccessResult(&result).
 		SetQueryParam("account_id", accountID).
-		Get(chatGPTSubscriptionsURL)
+		Get(openai.FirstOAuthEndpoints(endpoints).Rewrite(chatGPTSubscriptionsURL))
 	if err != nil {
 		slog.Warn("chatgpt_subscription_request_error", "error", err.Error())
 		return ""

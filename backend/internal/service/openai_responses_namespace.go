@@ -17,9 +17,9 @@ const openAIResponsesNamespaceNamesContextKey = "openai_responses_namespace_name
 // shouldFlattenOpenAIResponsesNamespaces 判定原生 Responses 转发前是否摊平
 // Codex namespace 工具。
 //
-// 默认不摊平：OAuth 账号的 HTTP 出口恒为 chatgpt.com/backend-api/codex/responses
-// （buildUpstreamRequest 只在 API Key 分支读 base_url），也就是 namespace 扩展的
-// 定义方本身；Codex 客户端对 WS 与 HTTP 两条传输发送同一份 tools（codex-rs
+// 默认不摊平：OAuth 账号默认使用官方 Codex Responses 端点，也就是 namespace
+// 扩展的定义方本身；自定义 OAuth 端点沿用该默认值，可通过账号开关启用兼容。
+// Codex 客户端对 WS 与 HTTP 两条传输发送同一份 tools（codex-rs
 // client.rs build_responses_request 无传输分支，WS 失败后会 session 级回落 HTTP
 // 继续发同样的声明）。摊平只改写工具名，改不掉客户端在 tools 描述与 developer
 // 消息里写死的 `to=functions.<namespace>.<tool>` 寻址约定，模型据此寻址必然落空

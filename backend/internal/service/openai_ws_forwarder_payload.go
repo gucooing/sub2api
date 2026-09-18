@@ -26,17 +26,27 @@ func validateOpenAIWSBearerToken(account *Account, token string) error {
 	return nil
 }
 
-func (s *OpenAIGatewayService) buildOpenAIResponsesWSURL(account *Account) (string, error) {
+func (s *OpenAIGatewayService) buildOpenAIResponsesWSURL(ctx context.Context, account *Account) (string, error) {
 	if account == nil {
 		return "", errors.New("account is nil")
+	}
+	if account.IsShadow() {
+		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+		if err != nil {
+			return "", err
+		}
+		account = resolved
+	}
+	if err := validateOpenAIOAuthEndpoints(account.OpenAIOAuthEndpoints(), s.cfg); err != nil {
+		return "", err
 	}
 	var targetURL string
 	switch account.Type {
 	case AccountTypeOAuth:
-		targetURL = chatgptCodexURL
+		targetURL = account.OpenAIOAuthURL(chatgptCodexURL)
 	case AccountTypeSetupToken:
 		if account.IsOpenAIOAuthLike() {
-			targetURL = chatgptCodexURL
+			targetURL = account.OpenAIOAuthURL(chatgptCodexURL)
 		} else {
 			targetURL = openaiPlatformAPIURL
 		}

@@ -12,7 +12,7 @@ import (
 
 type openaiOAuthClientAuthURLStub struct{}
 
-func (s *openaiOAuthClientAuthURLStub) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthClientAuthURLStub) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -20,7 +20,7 @@ func (s *openaiOAuthClientAuthURLStub) RefreshToken(ctx context.Context, refresh
 	return nil, errors.New("not implemented")
 }
 
-func (s *openaiOAuthClientAuthURLStub) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthClientAuthURLStub) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	return nil, errors.New("not implemented")
 }
 

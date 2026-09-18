@@ -1370,13 +1370,20 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
 	// Determine target URL based on account type
 	var targetURL string
+	var err error
 	switch account.Type {
 	case AccountTypeOAuth:
 		// OAuth accounts use ChatGPT internal API
-		targetURL = chatgptCodexURL
+		targetURL, err = s.openAIOAuthTarget(ctx, account, chatgptCodexURL)
+		if err != nil {
+			return nil, err
+		}
 	case AccountTypeSetupToken:
 		if account.IsOpenAIOAuthLike() {
-			targetURL = chatgptCodexURL
+			targetURL, err = s.openAIOAuthTarget(ctx, account, chatgptCodexURL)
+			if err != nil {
+				return nil, err
+			}
 		} else {
 			targetURL = openaiPlatformAPIURL
 		}
@@ -1425,7 +1432,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// Set headers specific to OAuth accounts (ChatGPT internal API)
 	if account.UsesOpenAICodexProtocol() {
 		// Required: set Host for ChatGPT API (must use req.Host, not Header.Set)
-		req.Host = "chatgpt.com"
+		req.Host = req.URL.Host
 		if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, req.Header, account); err != nil {
 			return nil, fmt.Errorf("resolve chatgpt account headers: %w", err)
 		}

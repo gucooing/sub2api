@@ -16,7 +16,7 @@ type openaiOAuthClientStateStub struct {
 	lastClientID   string
 }
 
-func (s *openaiOAuthClientStateStub) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthClientStateStub) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	atomic.AddInt32(&s.exchangeCalled, 1)
 	s.lastClientID = clientID
 	return &openai.TokenResponse{
@@ -30,7 +30,7 @@ func (s *openaiOAuthClientStateStub) RefreshToken(ctx context.Context, refreshTo
 	return nil, errors.New("not implemented")
 }
 
-func (s *openaiOAuthClientStateStub) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthClientStateStub) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	return s.RefreshToken(ctx, refreshToken, proxyURL)
 }
 

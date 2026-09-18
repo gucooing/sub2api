@@ -13,9 +13,9 @@ import (
 
 // OpenAIOAuthClient interface for OpenAI OAuth operations
 type OpenAIOAuthClient interface {
-	ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error)
+	ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error)
 	RefreshToken(ctx context.Context, refreshToken, proxyURL string) (*openai.TokenResponse, error)
-	RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string) (*openai.TokenResponse, error)
+	RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error)
 }
 
 // GrokOAuthClient interface for xAI/Grok OAuth operations.

@@ -201,7 +201,7 @@ func registerAgentIdentityTask(ctx context.Context, account *Account) (string, e
 		return "", errors.New("failed to serialize agent task registration")
 	}
 	url := strings.TrimRight(strings.TrimSpace(openAIAgentIdentityAuthAPIBaseURL), "/") + "/v1/agent/" + key.runtimeID + "/task/register"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, account.OpenAIOAuthURL(url), strings.NewReader(string(body)))
 	if err != nil {
 		return "", errors.New("failed to build agent task registration request")
 	}

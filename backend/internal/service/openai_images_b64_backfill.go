@@ -105,6 +105,13 @@ func (s *OpenAIGatewayService) fetchOpenAIImageURLBase64(ctx context.Context, ac
 	if s == nil || s.httpUpstream == nil {
 		return "", errors.New("http upstream is not configured")
 	}
+	if account.IsOpenAIOAuthLike() {
+		var err error
+		rawURL, err = s.openAIOAuthTarget(ctx, account, rawURL)
+		if err != nil {
+			return "", err
+		}
+	}
 	downloadURL, err := s.validateOutboundURL(rawURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid image url: %w", err)

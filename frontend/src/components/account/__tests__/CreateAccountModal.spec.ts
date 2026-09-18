@@ -671,6 +671,23 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(importCodexSessionMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBeUndefined()
   })
 
+  it('persists custom HTTP endpoints when importing an OAuth account', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    expect(wrapper.get<HTMLInputElement>('#openai-oauth-responses_url').element.value).toBe('https://chatgpt.com/backend-api/codex/responses')
+    await wrapper.get('#openai-oauth-responses_url').setValue('http://relay.example/codex/responses')
+    await wrapper.get('#openai-oauth-auth_base_url').setValue('http://relay.example/auth')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('custom endpoints')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+    expect(importCodexSessionMock.mock.calls[0]?.[0]?.credential_extras?.oauth_endpoints).toEqual({
+      responses_url: 'http://relay.example/codex/responses',
+      auth_base_url: 'http://relay.example/auth'
+    })
+    wrapper.unmount()
+  })
+
   it('leaves Codex PAT import billing ownership to the backend', async () => {
     const wrapper = await openCodexImportStep()
     await wrapper.get('[data-testid="import-codex-pat"]').trigger('click')

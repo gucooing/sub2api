@@ -1057,7 +1057,7 @@ func (s *AccountTestService) buildOpenAIOAuthUpstreamModelsRequest(ctx context.C
 	}
 
 	modelsURL, err := buildCodexModelsManifestURL(
-		chatgptCodexModelsURL,
+		credentialAccount.OpenAIOAuthURL(chatgptCodexModelsURL),
 		false,
 		CodexCanonicalClientVersion(),
 	)

@@ -190,6 +190,7 @@ import {
   type AuthInputMethod
 } from '@/composables/useAccountOAuth'
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
+import type { OpenAIOAuthEndpoints } from './openaiOAuthEndpoints'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import type { Account } from '@/types'
@@ -327,7 +328,7 @@ const handleGenerateUrl = async () => {
   if (!props.account) return
 
   if (isOpenAILike.value) {
-    await openaiOAuth.generateAuthUrl(props.account.proxy_id)
+    await openaiOAuth.generateAuthUrl(props.account.proxy_id, undefined, props.account.credentials?.oauth_endpoints as OpenAIOAuthEndpoints | undefined)
   } else if (isGemini.value) {
     const creds = (props.account.credentials || {}) as Record<string, unknown>
     const tierId = typeof creds.tier_id === 'string' ? creds.tier_id : undefined

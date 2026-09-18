@@ -434,6 +434,13 @@ func (s *OpenAIGatewayService) buildInputTokensUpstreamRequest(
 	token string,
 ) (*http.Request, error) {
 	targetURL := openaiPlatformAPIInputTokensURL
+	if account.IsOpenAIOAuthLike() {
+		var err error
+		targetURL, err = s.openAIOAuthTarget(ctx, account, targetURL)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if account.Type == AccountTypeAPIKey {
 		if baseURL := account.GetOpenAIBaseURL(); strings.TrimSpace(baseURL) != "" {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)

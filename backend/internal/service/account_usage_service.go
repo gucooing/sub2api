@@ -848,11 +848,11 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, chatgptCodexURL, bytes.NewReader(payloadBytes))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, account.OpenAIOAuthURL(chatgptCodexURL), bytes.NewReader(payloadBytes))
 	if err != nil {
 		return nil, fmt.Errorf("create openai probe request: %w", err)
 	}
-	req.Host = "chatgpt.com"
+	req.Host = req.URL.Host
 	req.Header.Set("Content-Type", "application/json")
 	if account.IsOpenAIAgentIdentity() {
 		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, account)

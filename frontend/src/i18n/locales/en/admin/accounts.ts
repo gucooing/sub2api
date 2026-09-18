@@ -589,6 +589,14 @@ export default {
       },
       // OpenAI specific hints
       openai: {
+        oauthEndpoints: {
+          title: 'OAuth request endpoints',
+          hint: 'Uses official URLs by default. HTTP and HTTPS are supported. Models, images and realtime use sibling paths of the Responses URL. Keeping the official Responses URL makes these APIs follow the ChatGPT base URL. Usage, subscriptions and privacy use the ChatGPT base URL; authorization and token refresh use the auth base URL.',
+          responses_url: 'Codex Responses URL',
+          chatgpt_base_url: 'ChatGPT base URL',
+          auth_base_url: 'OAuth auth base URL',
+          platform_base_url: 'OpenAI API base URL (token counting)'
+        },
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
         oauthPassthrough: 'Auto passthrough (auth only)',

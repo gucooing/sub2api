@@ -330,6 +330,27 @@ describe('EditAccountModal', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  it('loads, edits and resets OpenAI OAuth endpoints without dropping credentials', async () => {
+    const account = buildAccount()
+    account.type = 'oauth'
+    account.credentials = { access_token: 'at', oauth_endpoints: { auth_base_url: 'http://auth.example' } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('#openai-oauth-auth_base_url').element.value).toBe('http://auth.example')
+    await wrapper.get('#openai-oauth-chatgpt_base_url').setValue('http://chat.example')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toMatchObject({
+      access_token: 'at',
+      oauth_endpoints: { auth_base_url: 'http://auth.example', chatgpt_base_url: 'http://chat.example' }
+    })
+    await wrapper.get('#openai-oauth-auth_base_url').setValue('https://auth.openai.com')
+    await wrapper.get('#openai-oauth-chatgpt_base_url').setValue('https://chatgpt.com')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.lastCall?.[1]?.credentials).not.toHaveProperty('oauth_endpoints')
+    wrapper.unmount()
+  })
+
   it('sets expiry presets from now instead of extending the saved expiry', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2028-02-29T12:34:00'))

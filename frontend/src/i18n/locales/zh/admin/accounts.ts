@@ -676,6 +676,14 @@ export default {
       },
       // OpenAI specific hints
       openai: {
+        oauthEndpoints: {
+          title: 'OAuth 请求端点',
+          hint: '默认使用官方地址，支持 HTTP 和 HTTPS。模型、图片和实时接口使用 Responses 的同级路径；保留官方 Responses 地址时，这些接口随 ChatGPT 基础地址切换。额度、订阅和隐私使用 ChatGPT 基础地址，授权及令牌刷新使用授权基础地址。',
+          responses_url: 'Codex Responses 地址',
+          chatgpt_base_url: 'ChatGPT 基础地址',
+          auth_base_url: 'OAuth 授权基础地址',
+          platform_base_url: 'OpenAI API 基础地址（Token 计数）'
+        },
         baseUrlHint: '留空使用官方 OpenAI API',
         apiKeyHint: '您的 OpenAI API Key',
         oauthPassthrough: '自动透传（仅替换认证）',

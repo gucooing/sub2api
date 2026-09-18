@@ -26,6 +26,11 @@
         <p class="input-hint">{{ t('admin.accounts.notesHint') }}</p>
       </div>
 
+      <OpenAIOAuthEndpointsFields
+        v-if="account.platform === 'openai' && (account.type === 'oauth' || account.type === 'setup-token') && !isSparkShadow"
+        v-model="openaiOAuthEndpoints"
+      />
+
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey'" class="space-y-4">
         <div v-if="!isCNApiKeyAccount || editApiProtocol !== 'adaptive'">
@@ -3019,6 +3024,9 @@
 </template>
 
 <script setup lang="ts">
+import OpenAIOAuthEndpointsFields from './OpenAIOAuthEndpointsFields.vue'
+import { OPENAI_OAUTH_ENDPOINT_DEFAULTS, buildOpenAIOAuthEndpoints, type OpenAIOAuthEndpoints } from './openaiOAuthEndpoints'
+
 import { ref, reactive, computed, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
@@ -3507,6 +3515,7 @@ const tlsFingerprintProfiles = ref<{ id: number; name: string }[]>([])
 const sessionIdMaskingEnabled = ref(false)
 const cacheTTLOverrideEnabled = ref(false)
 const cacheTTLOverrideTarget = ref<string>('5m')
+const openaiOAuthEndpoints = ref<OpenAIOAuthEndpoints>({ ...OPENAI_OAUTH_ENDPOINT_DEFAULTS })
 const customBaseUrlEnabled = ref(false)
 const customBaseUrl = ref('')
 
@@ -3949,6 +3958,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   mixedChannelWarningDetails.value = null
   mixedChannelWarningRawMessage.value = ''
   mixedChannelWarningAction.value = null
+  openaiOAuthEndpoints.value = { ...OPENAI_OAUTH_ENDPOINT_DEFAULTS, ...(newAccount.credentials?.oauth_endpoints as OpenAIOAuthEndpoints | undefined) }
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
@@ -4931,6 +4941,13 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
   submitting.value = true
   try {
+    if (props.account?.platform === 'openai' && ['oauth', 'setup-token'].includes(props.account.type) && !isSparkShadow.value) {
+      const credentials = { ...((updatePayload.credentials as Record<string, unknown> | undefined) ?? props.account.credentials ?? {}) }
+      const endpoints = buildOpenAIOAuthEndpoints(openaiOAuthEndpoints.value)
+      if (endpoints) credentials.oauth_endpoints = endpoints
+      else delete credentials.oauth_endpoints
+      updatePayload.credentials = credentials
+    }
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
     updatedAccount = await persistGrokMediaEligibility(accountID, updatedAccount)
     appStore.showSuccess(t('admin.accounts.accountUpdated'))

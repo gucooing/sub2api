@@ -1839,6 +1839,10 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		return nil, err
 	}
 	// 复用 Codex 认证、影子账号及指纹头；仅切换已构造请求的端点和响应协议。
+	targetURL, err = s.openAIOAuthTarget(upstreamCtx, account, targetURL)
+	if err != nil {
+		return nil, err
+	}
 	upstreamReq.URL, err = url.Parse(targetURL)
 	if err != nil {
 		return nil, err

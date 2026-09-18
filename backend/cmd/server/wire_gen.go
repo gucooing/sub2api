@@ -149,7 +149,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	gatewayService := service.NewGatewayService(accountRepository, groupRepository, usageLogRepository, usageBillingRepository, userRepository, userSubscriptionRepository, userGroupRateRepository, gatewayCache, configConfig, schedulerSnapshotService, concurrencyService, billingService, rateLimitService, billingCacheService, identityService, httpUpstream, deferredService, claudeTokenProvider, sessionLimitCache, rpmCache, digestSessionStore, settingService, tlsFingerprintProfileService, channelService, modelPricingResolver, compositeRouteResolver, balanceNotifyService, serviceUserPlatformQuotaRepository)
 	openAIOAuthClient := repository.NewOpenAIOAuthClient()
 	privacyClientFactory := providePrivacyClientFactory()
-	openAIOAuthService := service.ProvideOpenAIOAuthService(proxyRepository, openAIOAuthClient, privacyClientFactory)
+	openAIOAuthService := service.ProvideOpenAIOAuthService(configConfig, proxyRepository, openAIOAuthClient, privacyClientFactory)
 	openAITokenProvider := service.ProvideOpenAITokenProvider(accountRepository, geminiTokenCache, openAIOAuthService, oAuthRefreshAPI)
 	grokOAuthClient := repository.NewGrokOAuthClient()
 	grokOAuthService := service.ProvideGrokOAuthService(proxyRepository, grokOAuthClient, configConfig, redisClient)

@@ -18,7 +18,7 @@ type openaiOAuthClientRefreshStub struct {
 	refreshCalls int32
 }
 
-func (s *openaiOAuthClientRefreshStub) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthClientRefreshStub) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -27,7 +27,7 @@ func (s *openaiOAuthClientRefreshStub) RefreshToken(ctx context.Context, refresh
 	return nil, errors.New("not implemented")
 }
 
-func (s *openaiOAuthClientRefreshStub) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthClientRefreshStub) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	atomic.AddInt32(&s.refreshCalls, 1)
 	return nil, errors.New("not implemented")
 }

@@ -10,6 +10,7 @@ import (
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
 
 const openAICodexPATWhoamiURLDefault = "https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami"
@@ -34,7 +35,11 @@ type openAICodexPATWhoamiResponse struct {
 
 // ValidateCodexPersonalAccessToken validates a Codex at-* token using the same
 // first-class PAT endpoint used by the Codex client.
-func (s *OpenAIOAuthService) ValidateCodexPersonalAccessToken(ctx context.Context, accessToken, proxyURL string) (*OpenAITokenInfo, error) {
+func (s *OpenAIOAuthService) ValidateCodexPersonalAccessToken(ctx context.Context, accessToken, proxyURL string, endpoints ...openai.OAuthEndpoints) (*OpenAITokenInfo, error) {
+	e := openai.FirstOAuthEndpoints(endpoints)
+	if err := validateOpenAIOAuthEndpoints(e, s.cfg); err != nil {
+		return nil, err
+	}
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_CODEX_PAT_REQUIRED", "access token is required")
@@ -52,7 +57,7 @@ func (s *OpenAIOAuthService) ValidateCodexPersonalAccessToken(ctx context.Contex
 		return nil, infraerrors.Newf(http.StatusBadRequest, "OPENAI_CODEX_PAT_PROXY_INVALID", "invalid proxy configuration: %v", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, openAICodexPATWhoamiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.Rewrite(openAICodexPATWhoamiURL), nil)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_PAT_REQUEST_FAILED", "failed to build validation request: %v", err)
 	}
@@ -87,6 +92,7 @@ func (s *OpenAIOAuthService) ValidateCodexPersonalAccessToken(ctx context.Contex
 	}
 
 	return &OpenAITokenInfo{
+		OAuthEndpoints:        e,
 		AccessToken:           accessToken,
 		AuthMode:              OpenAIAuthModePersonalAccessToken,
 		Email:                 strings.TrimSpace(whoami.Email),

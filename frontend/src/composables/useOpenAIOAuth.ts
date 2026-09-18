@@ -1,10 +1,12 @@
 import { ref } from 'vue'
+import type { OpenAIOAuthEndpoints } from '@/components/account/openaiOAuthEndpoints'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
 
 export interface OpenAITokenInfo {
+  oauth_endpoints?: OpenAIOAuthEndpoints
   access_token?: string
   refresh_token?: string
   client_id?: string
@@ -51,7 +53,8 @@ export function useOpenAIOAuth() {
   // Generate auth URL for OpenAI OAuth
   const generateAuthUrl = async (
     proxyId?: number | null,
-    redirectUri?: string
+    redirectUri?: string,
+    endpoints?: OpenAIOAuthEndpoints
   ): Promise<boolean> => {
     loading.value = true
     authUrl.value = ''
@@ -61,6 +64,7 @@ export function useOpenAIOAuth() {
 
     try {
       const payload: Record<string, unknown> = {}
+      if (endpoints) payload.oauth_endpoints = endpoints
       if (proxyId) {
         payload.proxy_id = proxyId
       }
@@ -136,7 +140,8 @@ export function useOpenAIOAuth() {
   const validateRefreshToken = async (
     refreshToken: string,
     proxyId?: number | null,
-    clientId?: string
+    clientId?: string,
+    endpoints?: OpenAIOAuthEndpoints
   ): Promise<OpenAITokenInfo | null> => {
     if (!refreshToken.trim()) {
       error.value = 'Missing refresh token'
@@ -152,7 +157,8 @@ export function useOpenAIOAuth() {
         refreshToken.trim(),
         proxyId,
         `${endpointPrefix}/refresh-token`,
-        clientId
+        clientId,
+        endpoints
       )
       return tokenInfo as OpenAITokenInfo
     } catch (err: any) {
@@ -205,6 +211,9 @@ export function useOpenAIOAuth() {
       creds.client_id = tokenInfo.client_id
     }
 
+    if (tokenInfo.oauth_endpoints && Object.values(tokenInfo.oauth_endpoints).some(Boolean)) {
+      creds.oauth_endpoints = tokenInfo.oauth_endpoints
+    }
     return creds
   }
 

@@ -23,7 +23,7 @@ type openaiOAuthService struct {
 	tokenURL string
 }
 
-func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	client, err := createOpenAIReqClient(proxyURL)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_CLIENT_INIT_FAILED", "create HTTP client: %v", err)
@@ -53,7 +53,7 @@ func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifie
 		SetHeader("originator", authOriginator).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
-		Post(s.tokenURL)
+		Post(openai.FirstOAuthEndpoints(endpoints).Rewrite(s.tokenURL))
 
 	if err != nil {
 		if shouldReturnOpenAINoProxyHint(ctx, proxyURL, err) {
@@ -73,16 +73,16 @@ func (s *openaiOAuthService) RefreshToken(ctx context.Context, refreshToken, pro
 	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, "")
 }
 
-func (s *openaiOAuthService) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthService) RefreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL string, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	// 调用方应始终传入正确的 client_id；为兼容旧数据，未指定时默认使用 OpenAI ClientID
 	clientID = strings.TrimSpace(clientID)
 	if clientID == "" {
 		clientID = openai.ClientID
 	}
-	return s.refreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
+	return s.refreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID, endpoints...)
 }
 
-func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL, clientID string) (*openai.TokenResponse, error) {
+func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL, clientID string, endpoints ...openai.OAuthEndpoints) (*openai.TokenResponse, error) {
 	client, err := createOpenAIReqClient(proxyURL)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_CLIENT_INIT_FAILED", "create HTTP client: %v", err)
@@ -103,7 +103,7 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 		SetHeader("originator", authOriginator).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
-		Post(s.tokenURL)
+		Post(openai.FirstOAuthEndpoints(endpoints).Rewrite(s.tokenURL))
 
 	if err != nil {
 		if shouldReturnOpenAINoProxyHint(ctx, proxyURL, err) {

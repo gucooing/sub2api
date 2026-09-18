@@ -41,12 +41,13 @@ const (
 
 // OAuthSession stores OAuth flow state for OpenAI
 type OAuthSession struct {
-	State        string    `json:"state"`
-	CodeVerifier string    `json:"code_verifier"`
-	ClientID     string    `json:"client_id,omitempty"`
-	ProxyURL     string    `json:"proxy_url,omitempty"`
-	RedirectURI  string    `json:"redirect_uri"`
-	CreatedAt    time.Time `json:"created_at"`
+	Endpoints    OAuthEndpoints `json:"oauth_endpoints,omitempty"`
+	State        string         `json:"state"`
+	CodeVerifier string         `json:"code_verifier"`
+	ClientID     string         `json:"client_id,omitempty"`
+	ProxyURL     string         `json:"proxy_url,omitempty"`
+	RedirectURI  string         `json:"redirect_uri"`
+	CreatedAt    time.Time      `json:"created_at"`
 }
 
 // SessionStore manages OAuth sessions in memory

@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import type { OpenAIOAuthEndpoints } from '@/components/account/openaiOAuthEndpoints'
 import type {
   Account,
   AccountListItem,
@@ -794,9 +795,10 @@ export async function refreshOpenAIToken(
   refreshToken: string,
   proxyId?: number | null,
   endpoint: string = '/admin/openai/refresh-token',
-  clientId?: string
+  clientId?: string,
+  endpoints?: OpenAIOAuthEndpoints
 ): Promise<Record<string, unknown>> {
-  const payload: { refresh_token: string; proxy_id?: number; client_id?: string } = {
+  const payload: { refresh_token: string; proxy_id?: number; client_id?: string; oauth_endpoints?: OpenAIOAuthEndpoints } = {
     refresh_token: refreshToken
   }
   if (proxyId) {
@@ -805,6 +807,7 @@ export async function refreshOpenAIToken(
   if (clientId) {
     payload.client_id = clientId
   }
+  if (endpoints) payload.oauth_endpoints = endpoints
   const { data } = await apiClient.post<Record<string, unknown>>(endpoint, payload)
   return data
 }
