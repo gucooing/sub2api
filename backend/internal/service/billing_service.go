@@ -535,6 +535,20 @@ func (s *BillingService) initFallbackPricing() {
 		LongContextOutputMultiplier:        1.5,
 	}
 
+	// GPT-6 Sol/Luna: cache writes follow the existing 1.25x input-price convention.
+	s.fallbackPrices["gpt-6-sol"] = &ModelPricing{
+		InputPricePerToken:         4e-6,
+		OutputPricePerToken:        20e-6,
+		CacheCreationPricePerToken: 5e-6,
+		CacheReadPricePerToken:     0.4e-6,
+	}
+	s.fallbackPrices["gpt-6-luna"] = &ModelPricing{
+		InputPricePerToken:         0.2e-6,
+		OutputPricePerToken:        1.2e-6,
+		CacheCreationPricePerToken: 0.25e-6,
+		CacheReadPricePerToken:     0.02e-6,
+	}
+
 	// OpenAI GPT-5.6 官方价格（USD/token）。缓存写入为输入价的 1.25 倍。
 	s.fallbackPrices["gpt-5.6-sol"] = &ModelPricing{
 		InputPricePerToken:                 5e-6,
@@ -938,6 +952,12 @@ func (s *BillingService) initFallbackPricing() {
 // getFallbackPricing 根据模型系列获取回退价格
 func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	modelLower := strings.ToLower(model)
+	normalized := normalizeModelNameForPricing(modelLower)
+	for _, family := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		if normalized == family || strings.HasPrefix(normalized, family+"-") {
+			return s.fallbackPrices[family]
+		}
+	}
 
 	// 按模型系列匹配
 	if isClaudeFable51Model(modelLower) {

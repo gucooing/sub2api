@@ -73,6 +73,26 @@ var (
 		Mode:                                "chat",
 		SupportsPromptCaching:               true,
 	}
+	// GPT-6 Sol/Luna use the configured price card; cache writes follow the
+	// existing 1.25x input-price convention.
+	openAIGPT6SolFallbackPricing = &LiteLLMModelPricing{
+		InputCostPerToken:           4e-06,
+		OutputCostPerToken:          20e-06,
+		CacheCreationInputTokenCost: 5e-06,
+		CacheReadInputTokenCost:     0.4e-06,
+		LiteLLMProvider:             "openai",
+		Mode:                        "chat",
+		SupportsPromptCaching:       true,
+	}
+	openAIGPT6LunaFallbackPricing = &LiteLLMModelPricing{
+		InputCostPerToken:           0.2e-06,
+		OutputCostPerToken:          1.2e-06,
+		CacheCreationInputTokenCost: 0.25e-06,
+		CacheReadInputTokenCost:     0.02e-06,
+		LiteLLMProvider:             "openai",
+		Mode:                        "chat",
+		SupportsPromptCaching:       true,
+	}
 	openAIGPT56SolFallbackPricing = &LiteLLMModelPricing{
 		InputCostPerToken:                   5e-06,
 		InputCostPerTokenPriority:           1e-05,
@@ -1453,6 +1473,22 @@ func (s *PricingService) matchByModelFamily(model string) *LiteLLMModelPricing {
 // 5. gpt-5.4* -> 业务静态兜底价
 // 6. 最终回退到 DefaultTestModel (gpt-5.1-codex)
 func (s *PricingService) matchOpenAIModel(model string) *LiteLLMModelPricing {
+	// Resolve Sol/Luna before generic GPT-6 variants, which can refer to Astra.
+	for _, family := range []struct {
+		name     string
+		fallback *LiteLLMModelPricing
+	}{
+		{name: "gpt-6-sol", fallback: openAIGPT6SolFallbackPricing},
+		{name: "gpt-6-luna", fallback: openAIGPT6LunaFallbackPricing},
+	} {
+		if model == family.name || strings.HasPrefix(model, family.name+"-") {
+			if pricing, ok := s.pricingData[family.name]; ok {
+				return pricing
+			}
+			return family.fallback
+		}
+	}
+
 	if strings.HasPrefix(model, "gpt-5.3-codex-spark") {
 		if pricing, ok := s.pricingData["gpt-5.1-codex"]; ok {
 			logger.LegacyPrintf("service.pricing", "[Pricing][SparkBilling] %s -> %s billing", model, "gpt-5.1-codex")
