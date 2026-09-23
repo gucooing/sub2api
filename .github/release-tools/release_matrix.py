@@ -17,7 +17,8 @@ import yaml
 FULL_CONFIG = Path('.goreleaser.yaml')
 SIMPLE_CONFIG = Path('.goreleaser.simple.yaml')
 VERSION_FILE = Path('backend/cmd/server/VERSION')
-VERSION_RE = re.compile(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?')
+# Fork releases append a fourth numeric component to the upstream version.
+VERSION_RE = re.compile(r'\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?')
 
 
 def config(simple=False):
@@ -59,7 +60,7 @@ def plan(args):
         tag = args.ref
         version = tag.removeprefix('v')
         if not tag.startswith('v') or not VERSION_RE.fullmatch(version):
-            raise ValueError('publishing requires a v-prefixed release version tag')
+            raise ValueError('publishing requires a v-prefixed release version tag (vX.Y.Z or vX.Y.Z.N)')
         tagged_sha = subprocess.check_output(['git', 'rev-parse', '--verify', f'refs/tags/{tag}^{{commit}}'], text=True).strip()
         if sha != tagged_sha:
             raise ValueError('checkout does not match the selected release tag')

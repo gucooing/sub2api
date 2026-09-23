@@ -32,11 +32,11 @@ class ReleaseMatrixTest(unittest.TestCase):
         Path('backend/cmd/server').mkdir(parents=True)
         release.VERSION_FILE.write_text('9.8.7\n')
 
-    def fixture_artifacts(self, simple=False):
+    def fixture_artifacts(self, simple=False, version='9.8.7'):
         directory = Path('release-input')
         directory.mkdir()
         for target in release.targets(simple):
-            name = release.archive_name('9.8.7', target)
+            name = release.archive_name(version, target)
             archive = directory / name
             if target['goos'] == 'linux':
                 with tarfile.open(archive, 'w:gz') as out:
@@ -46,10 +46,10 @@ class ReleaseMatrixTest(unittest.TestCase):
                     out.addfile(info, io.BytesIO(b'fixture'))
             else:
                 archive.write_bytes(b'fixture archive')
-            metadata = {'version': '9.8.7', 'sha': 'a' * 40, 'target': target,
+            metadata = {'version': version, 'sha': 'a' * 40, 'target': target,
                         'archive': name, 'sha256': release.sha256(archive)}
             (directory / f"manifest-{target['goos']}-{target['goarch']}.json").write_text(json.dumps(metadata))
-        return argparse.Namespace(input='release-input', version='9.8.7', sha='a' * 40, simple=simple, output='contexts')
+        return argparse.Namespace(input='release-input', version=version, sha='a' * 40, simple=simple, output='contexts')
 
     def test_full_and_simple_matrix_match_existing_targets(self):
         full = release.targets()
@@ -126,10 +126,49 @@ class ReleaseMatrixTest(unittest.TestCase):
         with patch.object(subprocess, 'check_output', return_value='a' * 40 + '\n'):
             with self.assertRaisesRegex(ValueError, 'version tag'):
                 release.plan(args)
-        args.ref = 'v9.8.7'
-        with patch.object(subprocess, 'check_output', side_effect=['a' * 40 + '\n', 'b' * 40 + '\n']):
-            with self.assertRaisesRegex(ValueError, 'does not match'):
-                release.plan(args)
+        for args.ref in ('v9.8.7', 'v9.8.7.1'):
+            with self.subTest(tag=args.ref), patch.object(
+                subprocess, 'check_output', side_effect=['a' * 40 + '\n', 'b' * 40 + '\n']
+            ):
+                with self.assertRaisesRegex(ValueError, 'does not match'):
+                    release.plan(args)
+
+    def test_plan_accepts_repository_release_versions(self):
+        for version in ('0.2.7', '0.2.7.2', '0.2.7-rc.1', '0.2.7.2-rc.1'):
+            with self.subTest(version=version):
+                tag = 'v' + version
+                with patch.dict(os.environ, {'GITHUB_OUTPUT': 'outputs'}), patch.object(
+                    subprocess, 'check_output', return_value='a' * 40 + '\n'
+                ):
+                    release.plan(argparse.Namespace(ref=tag, dry_run=False, simple=False))
+                output = dict(line.split('=', 1) for line in Path('outputs').read_text().splitlines())
+                self.assertEqual(output['tag'], tag)
+                self.assertEqual(output['version'], version)
+                self.assertEqual(release.VERSION_FILE.read_text(), version + '\n')
+
+    def test_plan_rejects_missing_prefix_and_invalid_version_components(self):
+        for tag in ('0.2.7.2', 'v0.2', 'v0.2.7.', 'v0.2.7.2.1', 'v0.2.7.patch', 'v0.2.7/2'):
+            with self.subTest(tag=tag), patch.object(subprocess, 'check_output', return_value='a' * 40 + '\n'):
+                with self.assertRaisesRegex(ValueError, 'version tag'):
+                    release.plan(argparse.Namespace(ref=tag, dry_run=False, simple=False))
+
+    def test_four_component_version_artifacts_keep_source_binding(self):
+        args = self.fixture_artifacts(version='0.2.7.2')
+        release.verify(args)
+        for target in release.targets():
+            name = release.archive_name(args.version, target)
+            self.assertTrue(name.startswith('sub2api_0.2.7.2_'))
+            self.assertTrue((Path(args.input) / name).is_file())
+
+    def test_dry_run_accepts_four_component_version(self):
+        release.VERSION_FILE.write_text('0.2.7.2\n')
+        with patch.dict(os.environ, {'GITHUB_OUTPUT': 'outputs'}), patch.object(
+            subprocess, 'check_output', return_value='a' * 40 + '\n'
+        ):
+            release.plan(argparse.Namespace(ref='main', dry_run=True, simple=False))
+        output = dict(line.split('=', 1) for line in Path('outputs').read_text().splitlines())
+        self.assertEqual(output['tag'], 'v0.2.7.2')
+        self.assertEqual(output['version'], '0.2.7.2')
 
     def test_dry_run_plan_resolves_matrix_without_a_new_tag(self):
         with patch.dict(os.environ, {'GITHUB_OUTPUT': 'outputs', 'GITHUB_REPOSITORY_OWNER': 'ExampleOwner'}), patch.object(subprocess, 'check_output', return_value='a' * 40 + '\n'):
