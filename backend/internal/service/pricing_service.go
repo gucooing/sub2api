@@ -76,22 +76,28 @@ var (
 	// GPT-6 Sol/Luna use the configured price card; cache writes follow the
 	// existing 1.25x input-price convention.
 	openAIGPT6SolFallbackPricing = &LiteLLMModelPricing{
-		InputCostPerToken:           4e-06,
-		OutputCostPerToken:          20e-06,
-		CacheCreationInputTokenCost: 5e-06,
-		CacheReadInputTokenCost:     0.4e-06,
-		LiteLLMProvider:             "openai",
-		Mode:                        "chat",
-		SupportsPromptCaching:       true,
+		InputCostPerToken:               2e-06,
+		OutputCostPerToken:              10e-06,
+		CacheCreationInputTokenCost:     2.5e-06,
+		CacheReadInputTokenCost:         0.2e-06,
+		LongContextInputTokenThreshold:  272_000,
+		LongContextInputCostMultiplier:  2,
+		LongContextOutputCostMultiplier: 1.5,
+		LiteLLMProvider:                 "openai",
+		Mode:                            "chat",
+		SupportsPromptCaching:           true,
 	}
 	openAIGPT6LunaFallbackPricing = &LiteLLMModelPricing{
-		InputCostPerToken:           0.2e-06,
-		OutputCostPerToken:          1.2e-06,
-		CacheCreationInputTokenCost: 0.25e-06,
-		CacheReadInputTokenCost:     0.02e-06,
-		LiteLLMProvider:             "openai",
-		Mode:                        "chat",
-		SupportsPromptCaching:       true,
+		InputCostPerToken:               0.1e-06,
+		OutputCostPerToken:              0.5e-06,
+		CacheCreationInputTokenCost:     0.125e-06,
+		CacheReadInputTokenCost:         0.01e-06,
+		LongContextInputTokenThreshold:  272_000,
+		LongContextInputCostMultiplier:  2,
+		LongContextOutputCostMultiplier: 1.5,
+		LiteLLMProvider:                 "openai",
+		Mode:                            "chat",
+		SupportsPromptCaching:           true,
 	}
 	openAIGPT56SolFallbackPricing = &LiteLLMModelPricing{
 		InputCostPerToken:                   5e-06,

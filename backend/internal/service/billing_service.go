@@ -537,16 +537,22 @@ func (s *BillingService) initFallbackPricing() {
 
 	// GPT-6 Sol/Luna: cache writes follow the existing 1.25x input-price convention.
 	s.fallbackPrices["gpt-6-sol"] = &ModelPricing{
-		InputPricePerToken:         4e-6,
-		OutputPricePerToken:        20e-6,
-		CacheCreationPricePerToken: 5e-6,
-		CacheReadPricePerToken:     0.4e-6,
+		InputPricePerToken:          2e-6,
+		OutputPricePerToken:         10e-6,
+		CacheCreationPricePerToken:  2.5e-6,
+		CacheReadPricePerToken:      0.2e-6,
+		LongContextInputThreshold:   272_000,
+		LongContextInputMultiplier:  2,
+		LongContextOutputMultiplier: 1.5,
 	}
 	s.fallbackPrices["gpt-6-luna"] = &ModelPricing{
-		InputPricePerToken:         0.2e-6,
-		OutputPricePerToken:        1.2e-6,
-		CacheCreationPricePerToken: 0.25e-6,
-		CacheReadPricePerToken:     0.02e-6,
+		InputPricePerToken:          0.1e-6,
+		OutputPricePerToken:         0.5e-6,
+		CacheCreationPricePerToken:  0.125e-6,
+		CacheReadPricePerToken:      0.01e-6,
+		LongContextInputThreshold:   272_000,
+		LongContextInputMultiplier:  2,
+		LongContextOutputMultiplier: 1.5,
 	}
 
 	// OpenAI GPT-5.6 官方价格（USD/token）。缓存写入为输入价的 1.25 倍。

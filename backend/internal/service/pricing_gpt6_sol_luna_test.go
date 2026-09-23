@@ -33,32 +33,76 @@ func TestGPT6SolLunaBilling(t *testing.T) {
 		{name: "stale_catalog", pricing: stale},
 		{name: "billing_fallback"},
 	}
-	models := []struct {
-		name                              string
+	type rates struct {
 		input, output, cacheWrite, cached float64
-	}{
-		{name: "gpt-6-sol", input: 4, output: 20, cacheWrite: 5, cached: 0.4},
-		{name: "gpt-6-luna", input: 0.2, output: 1.2, cacheWrite: 0.25, cached: 0.02},
 	}
-	tokens := UsageTokens{
-		InputTokens: 1000, OutputTokens: 2000, CacheCreationTokens: 3000, CacheReadTokens: 4000,
+	models := []struct {
+		name        string
+		short, long rates
+	}{
+		{
+			name:  "gpt-6-sol",
+			short: rates{input: 2, output: 10, cacheWrite: 2.5, cached: 0.2},
+			long:  rates{input: 4, output: 15, cacheWrite: 5, cached: 0.4},
+		},
+		{
+			name:  "gpt-6-luna",
+			short: rates{input: 0.1, output: 0.5, cacheWrite: 0.125, cached: 0.01},
+			long:  rates{input: 0.2, output: 0.75, cacheWrite: 0.25, cached: 0.02},
+		},
+	}
+	contexts := []struct {
+		name   string
+		tokens UsageTokens
+		long   bool
+	}{
+		{
+			name: "short_context",
+			tokens: UsageTokens{
+				InputTokens: 1000, OutputTokens: 2000, CacheCreationTokens: 3000, CacheReadTokens: 4000,
+			},
+		},
+		{
+			name: "at_threshold",
+			tokens: UsageTokens{
+				InputTokens: 100_000, OutputTokens: 2000, CacheCreationTokens: 100_000, CacheReadTokens: 72_000,
+			},
+		},
+		{
+			name: "above_threshold",
+			tokens: UsageTokens{
+				InputTokens: 100_000, OutputTokens: 2000, CacheCreationTokens: 100_000, CacheReadTokens: 72_001,
+			},
+			long: true,
+		},
 	}
 	for _, source := range sources {
 		t.Run(source.name, func(t *testing.T) {
 			svc := NewBillingService(&config.Config{}, source.pricing)
 			for _, model := range models {
 				for _, name := range []string{model.name, "openai/" + model.name, model.name + "-preview"} {
-					t.Run(name, func(t *testing.T) {
-						cost, err := svc.CalculateCost(name, tokens, 1)
-						require.NoError(t, err)
-						is := assert.New(t)
-						is.InDelta(model.input/1000, cost.InputCost, 1e-12)
-						is.InDelta(model.output*2/1000, cost.OutputCost, 1e-12)
-						is.InDelta(model.cacheWrite*3/1000, cost.CacheCreationCost, 1e-12)
-						is.InDelta(model.cached*4/1000, cost.CacheReadCost, 1e-12)
-						expected := (model.input + model.output*2 + model.cacheWrite*3 + model.cached*4) / 1000
-						is.InDelta(expected, cost.TotalCost, 1e-12)
-					})
+					for _, context := range contexts {
+						t.Run(name+"/"+context.name, func(t *testing.T) {
+							prices := model.short
+							if context.long {
+								prices = model.long
+							}
+							tokens := context.tokens
+							cost, err := svc.CalculateCost(name, tokens, 1)
+							require.NoError(t, err)
+							is := assert.New(t)
+							inputCost := float64(tokens.InputTokens) * prices.input / 1e6
+							outputCost := float64(tokens.OutputTokens) * prices.output / 1e6
+							cacheWriteCost := float64(tokens.CacheCreationTokens) * prices.cacheWrite / 1e6
+							cacheReadCost := float64(tokens.CacheReadTokens) * prices.cached / 1e6
+							is.Equal(context.long, cost.LongContextBillingApplied)
+							is.InDelta(inputCost, cost.InputCost, 1e-12)
+							is.InDelta(outputCost, cost.OutputCost, 1e-12)
+							is.InDelta(cacheWriteCost, cost.CacheCreationCost, 1e-12)
+							is.InDelta(cacheReadCost, cost.CacheReadCost, 1e-12)
+							is.InDelta(inputCost+outputCost+cacheWriteCost+cacheReadCost, cost.TotalCost, 1e-12)
+						})
+					}
 				}
 			}
 		})
