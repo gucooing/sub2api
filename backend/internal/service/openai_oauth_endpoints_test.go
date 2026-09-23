@@ -129,7 +129,13 @@ func TestOpenAIOAuthEndpointsQuotaAndPrivacyHTTP(t *testing.T) {
 	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{1: account}}
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(account): "test-token"}}
 	factory := func(string) (*req.Client, error) { return req.C().SetTimeout(openaiQuotaUpstreamTimeout), nil }
-	svc := NewOpenAIQuotaService(repo, nil, NewOpenAITokenProvider(repo, tokenCache, nil), factory)
+	svc := NewOpenAIQuotaService(
+		repo,
+		nil,
+		NewOpenAITokenProvider(repo, tokenCache, nil),
+		factory,
+		nil,
+	)
 	if _, err := svc.QueryUsage(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
