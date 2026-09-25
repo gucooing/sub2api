@@ -19,8 +19,8 @@ const (
 	ClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 	// OAuth endpoints
-	AuthorizeURL = "https://auth.openai.com/oauth/authorize"
-	TokenURL     = "https://auth.openai.com/oauth/token"
+	AuthorizeURL = DefaultAuthBaseURL + "/oauth/authorize"
+	TokenURL     = DefaultAuthBaseURL + "/oauth/token"
 
 	// Default redirect URI (can be customized)
 	DefaultRedirectURI = "http://localhost:1455/auth/callback"

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/imroc/req/v3"
 )
 
@@ -24,9 +25,9 @@ var ErrSparkShadowResetNotSupported = infraerrors.New(http.StatusConflict, "SPAR
 
 // Endpoints used by the OpenAI/ChatGPT/Codex quota query and reset feature.
 const (
-	chatGPTUsageURL             = "https://chatgpt.com/backend-api/wham/usage"
-	chatGPTRateLimitCreditsURL  = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-	chatGPTRateLimitResetURL    = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
+	chatGPTUsageURL             = openai.DefaultChatGPTBaseURL + "/backend-api/wham/usage"
+	chatGPTRateLimitCreditsURL  = openai.DefaultChatGPTBaseURL + "/backend-api/wham/rate-limit-reset-credits"
+	chatGPTRateLimitResetURL    = chatGPTRateLimitCreditsURL + "/consume"
 	openaiQuotaUpstreamTimeout  = 20 * time.Second
 	openaiQuotaCodexBeta        = "codex-1"
 	openaiQuotaCodexOriginator  = "Codex Desktop"

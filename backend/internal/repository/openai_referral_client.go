@@ -6,13 +6,14 @@ import (
 	"net/http"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/imroc/req/v3"
 )
 
 // Desktop 26.908.40834, app-primary-44ec287874b7.js: SIt, EIt, PIt, FIt.
 // Referrals use /backend-api/referrals, not /backend-api/wham.
-const openAIReferralURL = "https://chatgpt.com/backend-api/referrals/invite"
+const openAIReferralURL = openai.DefaultChatGPTBaseURL + "/backend-api/referrals/invite"
 const openAIReferralEntrypoint = "persistent"
 
 type openAIReferralClient struct {
@@ -38,7 +39,7 @@ func (c *openAIReferralClient) QueryEligibility(ctx context.Context, call servic
 	if err != nil {
 		return nil, err
 	}
-	resp, err := r.SetQueryParams(map[string]string{"program_id": call.ProgramID, "entrypoint": openAIReferralEntrypoint}).Get(c.baseURL + "/eligibility")
+	resp, err := r.SetQueryParams(map[string]string{"program_id": call.ProgramID, "entrypoint": openAIReferralEntrypoint}).Get(call.Endpoints.Rewrite(c.baseURL + "/eligibility"))
 	if err != nil {
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_REFERRAL_QUERY_FAILED", "failed to query invitation eligibility")
 	}
@@ -59,7 +60,7 @@ func (c *openAIReferralClient) SendInvite(ctx context.Context, call service.Open
 	}
 	resp, err := r.SetBody(map[string]any{
 		"program_id": call.ProgramID, "entrypoint": openAIReferralEntrypoint, "emails": []string{email},
-	}).Post(c.baseURL)
+	}).Post(call.Endpoints.Rewrite(c.baseURL))
 	if err != nil {
 		return referralSendUnknown()
 	}

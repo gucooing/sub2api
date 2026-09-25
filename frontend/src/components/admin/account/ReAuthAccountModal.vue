@@ -200,6 +200,7 @@ import {
   type AuthInputMethod
 } from '@/composables/useAccountOAuth'
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
+import type { OpenAIOAuthEndpoints } from '@/components/account/openaiOAuthEndpoints'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
@@ -370,7 +371,11 @@ const handleGenerateUrl = async () => {
   if (!props.account) return
 
   if (isOpenAILike.value) {
-    await openaiOAuth.generateAuthUrl(props.account.proxy_id)
+    await openaiOAuth.generateAuthUrl(
+      props.account.proxy_id,
+      undefined,
+      props.account.credentials?.oauth_endpoints as OpenAIOAuthEndpoints | undefined
+    )
   } else if (isGemini.value) {
     const creds = (props.account.credentials || {}) as Record<string, unknown>
     const tierId = typeof creds.tier_id === 'string' ? creds.tier_id : undefined
@@ -644,12 +649,21 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
     openaiOAuth.loading.value = true
     openaiOAuth.error.value = ''
     try {
-      const tokenInfo = await openaiOAuth.validateRefreshToken(refreshToken, props.account.proxy_id)
+      const credentials = props.account.credentials
+      const tokenInfo = await openaiOAuth.validateRefreshToken(
+        refreshToken,
+        props.account.proxy_id,
+        typeof credentials?.client_id === 'string' ? credentials.client_id : undefined,
+        credentials?.oauth_endpoints as OpenAIOAuthEndpoints | undefined
+      )
       if (!tokenInfo) return
 
       const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
         type: 'oauth',
-        credentials: openaiOAuth.buildCredentials(tokenInfo),
+        credentials: openaiOAuth.buildCredentials({
+          ...tokenInfo,
+          refresh_token: tokenInfo.refresh_token || refreshToken
+        }),
         extra: openaiOAuth.buildExtraInfo(tokenInfo)
       })
       appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/imroc/req/v3"
 	"github.com/stretchr/testify/require"
@@ -67,6 +68,30 @@ func TestOpenAIReferralClientProtocol(t *testing.T) {
 	require.NoError(t, client.SendInvite(context.Background(), referralTestCall(), "friend@example.com"))
 	require.EqualValues(t, 1, gets.Load())
 	require.EqualValues(t, 1, posts.Load())
+}
+
+func TestOpenAIReferralClientCustomEndpoints(t *testing.T) {
+	paths := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.Path
+		require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			require.Equal(t, "codex_referral_consumer", r.URL.Query().Get("program_id"))
+			_, _ = w.Write([]byte(`{"should_show":true,"remaining_send_capacity":1}`))
+		} else {
+			_, _ = w.Write([]byte(`{"invites":[{"referral_id":"test"}]}`))
+		}
+	}))
+	defer srv.Close()
+	client := NewOpenAIReferralClient(func(string) (*req.Client, error) { return req.C(), nil })
+	call := referralTestCall()
+	call.Endpoints = openai.OAuthEndpoints{ChatGPTBaseURL: srv.URL + "/relay"}
+	_, err := client.QueryEligibility(context.Background(), call)
+	require.NoError(t, err)
+	require.NoError(t, client.SendInvite(context.Background(), call, "friend@example.com"))
+	require.Equal(t, "/relay/backend-api/referrals/invite/eligibility", <-paths)
+	require.Equal(t, "/relay/backend-api/referrals/invite", <-paths)
 }
 
 func TestOpenAIReferralClientSanitizesErrorsWithoutRetry(t *testing.T) {

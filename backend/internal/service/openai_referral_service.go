@@ -8,6 +8,7 @@ import (
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
 
 const (
@@ -92,7 +93,7 @@ func referralProgram(a *Account) string {
 	}
 }
 
-func (s *OpenAIQuotaService) referralCall(ctx context.Context, id int64, program string) (OpenAIReferralCall, error) {
+func (s *OpenAIQuotaService) referralCall(ctx context.Context, id int64, program string, endpoints openai.OAuthEndpoints) (OpenAIReferralCall, error) {
 	if s.referralClient == nil {
 		return OpenAIReferralCall{}, infraerrors.New(http.StatusServiceUnavailable, "OPENAI_REFERRAL_NOT_CONFIGURED", "referral service is unavailable")
 	}
@@ -104,7 +105,7 @@ func (s *OpenAIQuotaService) referralCall(ctx context.Context, id int64, program
 	if err != nil {
 		return OpenAIReferralCall{}, infraerrors.New(http.StatusBadGateway, "OPENAI_REFERRAL_AUTH_ERROR", "failed to authenticate referral request")
 	}
-	return OpenAIReferralCall{ProxyURL: proxy, Headers: headers, ProgramID: program}, nil
+	return OpenAIReferralCall{ProxyURL: proxy, Headers: headers, ProgramID: program, Endpoints: endpoints}, nil
 }
 
 func (s *OpenAIQuotaService) QueryReferralEligibility(ctx context.Context, id int64) (*OpenAIReferralEligibility, error) {
@@ -115,7 +116,7 @@ func (s *OpenAIQuotaService) QueryReferralEligibility(ctx context.Context, id in
 	callCtx, cancel := context.WithTimeout(ctx, openaiQuotaUpstreamTimeout)
 	defer cancel()
 	program := referralProgram(account)
-	call, err := s.referralCall(callCtx, id, program)
+	call, err := s.referralCall(callCtx, id, program, account.OpenAIOAuthEndpoints())
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +171,7 @@ func (s *OpenAIQuotaService) SendReferralInvite(ctx context.Context, id int64, i
 	}
 	callCtx, cancel := context.WithTimeout(ctx, openaiQuotaUpstreamTimeout)
 	defer cancel()
-	call, err := s.referralCall(callCtx, id, eligibility.ProgramID)
+	call, err := s.referralCall(callCtx, id, eligibility.ProgramID, account.OpenAIOAuthEndpoints())
 	if err != nil {
 		return nil, err
 	}

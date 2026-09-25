@@ -1,6 +1,10 @@
 package service
 
-import "context"
+import (
+	"context"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+)
 
 // OpenAIReferralCall carries the account's refreshed authentication and proxy
 // settings to the transport adapter. Headers must never be logged or persisted.
@@ -8,6 +12,7 @@ type OpenAIReferralCall struct {
 	ProxyURL  string
 	Headers   map[string]string
 	ProgramID string
+	Endpoints openai.OAuthEndpoints
 }
 
 // OpenAIReferralClient isolates invitation transport from eligibility policy.

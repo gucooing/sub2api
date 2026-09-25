@@ -10,6 +10,7 @@ import (
 	"github.com/imroc/req/v3"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,6 +57,8 @@ func TestOpenAIReferralSend(t *testing.T) {
 				Rules:  []string{"Offer rule"},
 			}}
 			svc, repo := referralTestService(t, tc.plan, client)
+			endpoints := openai.OAuthEndpoints{ChatGPTBaseURL: "https://chat.example/relay"}
+			repo.accounts[100].Credentials["oauth_endpoints"] = endpoints
 			eligibility, err := svc.QueryReferralEligibility(context.Background(), 100)
 			require.NoError(t, err)
 			require.Equal(t, 3, *eligibility.AvailableInvites)
@@ -72,6 +75,7 @@ func TestOpenAIReferralSend(t *testing.T) {
 			require.Equal(t, []string{"friend@example.com"}, client.emails)
 			require.Len(t, client.calls, 3, "send must recheck eligibility")
 			for _, call := range client.calls {
+				require.Equal(t, endpoints, call.Endpoints)
 				require.Equal(t, tc.program, call.ProgramID)
 				headers := make(http.Header)
 				for key, value := range call.Headers {
@@ -82,6 +86,19 @@ func TestOpenAIReferralSend(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpenAIReferralShadowUsesParentEndpoints(t *testing.T) {
+	client := &referralClientStub{eligibility: &OpenAIReferralEligibility{}}
+	svc, repo := referralTestService(t, "plus", client)
+	parentID := int64(100)
+	endpoints := openai.OAuthEndpoints{ChatGPTBaseURL: "https://parent.example/relay"}
+	repo.accounts[parentID].Credentials["oauth_endpoints"] = endpoints
+	repo.accounts[101] = &Account{ID: 101, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &parentID}
+	_, err := svc.QueryReferralEligibility(context.Background(), 101)
+	require.NoError(t, err)
+	require.Len(t, client.calls, 1)
+	require.Equal(t, endpoints, client.calls[0].Endpoints)
 }
 
 func TestOpenAIReferralSendGuards(t *testing.T) {

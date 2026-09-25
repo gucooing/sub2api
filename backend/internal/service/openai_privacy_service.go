@@ -16,7 +16,7 @@ import (
 type PrivacyClientFactory func(proxyURL string) (*req.Client, error)
 
 const (
-	openAISettingsURL = "https://chatgpt.com/backend-api/settings/account_user_setting"
+	openAISettingsURL = openai.DefaultChatGPTBaseURL + "/backend-api/settings/account_user_setting"
 
 	PrivacyModeTrainingOff = "training_off"
 	PrivacyModeFailed      = "training_set_failed"
@@ -108,8 +108,8 @@ type ChatGPTAccountInfo struct {
 }
 
 var (
-	chatGPTAccountsCheckURL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
-	chatGPTSubscriptionsURL = "https://chatgpt.com/backend-api/subscriptions"
+	chatGPTAccountsCheckURL = openai.DefaultChatGPTBaseURL + "/backend-api/accounts/check/v4-2023-04-27"
+	chatGPTSubscriptionsURL = openai.DefaultChatGPTBaseURL + "/backend-api/subscriptions"
 )
 
 // fetchChatGPTAccountInfo calls ChatGPT backend-api to get account info (plan_type, etc.).

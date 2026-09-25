@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 	"github.com/imroc/req/v3"
+	"github.com/stretchr/testify/require"
 )
 
 func TestOpenAIOAuthEndpointsRequests(t *testing.T) {
@@ -112,9 +113,9 @@ func TestOpenAIOAuthEndpointsQuotaAndPrivacyHTTP(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/relay/backend-api/wham/usage":
-			_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":0}}`))
+			_, _ = w.Write([]byte(`{"rate_limit_reset_credits":{"available_count":2},"credits":{"has_credits":true,"balance":"12.50"}}`))
 		case "/relay/backend-api/wham/rate-limit-reset-credits":
-			_, _ = w.Write([]byte(`{"credits":[]}`))
+			_, _ = w.Write([]byte(`{"available_count":2,"credits":[]}`))
 		case "/relay/backend-api/wham/rate-limit-reset-credits/consume":
 			_, _ = w.Write([]byte(`{"status":"success"}`))
 		case "/relay/backend-api/settings/account_user_setting":
@@ -126,7 +127,9 @@ func TestOpenAIOAuthEndpointsQuotaAndPrivacyHTTP(t *testing.T) {
 	defer srv.Close()
 	e := openai.OAuthEndpoints{ChatGPTBaseURL: srv.URL + "/relay"}
 	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "account-id", "oauth_endpoints": e}}
-	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{1: account}}
+	parentID := account.ID
+	shadow := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, ParentAccountID: &parentID}
+	repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{1: account, 2: shadow}}
 	tokenCache := &stubQuotaTokenCache{tokens: map[string]string{OpenAITokenCacheKey(account): "test-token"}}
 	factory := func(string) (*req.Client, error) { return req.C().SetTimeout(openaiQuotaUpstreamTimeout), nil }
 	svc := NewOpenAIQuotaService(
@@ -136,8 +139,14 @@ func TestOpenAIOAuthEndpointsQuotaAndPrivacyHTTP(t *testing.T) {
 		factory,
 		nil,
 	)
-	if _, err := svc.QueryUsage(context.Background(), 1); err != nil {
-		t.Fatal(err)
+	for _, id := range []int64{1, 2} {
+		usage, err := svc.QueryUsage(context.Background(), id)
+		require.NoError(t, err)
+		require.NotNil(t, usage.RateLimitResetCredits)
+		require.Equal(t, 2, usage.RateLimitResetCredits.AvailableCount)
+		require.NotNil(t, usage.Credits)
+		require.NotNil(t, usage.Credits.Balance)
+		require.Equal(t, "12.50", *usage.Credits.Balance)
 	}
 	if _, err := svc.ResetCredit(context.Background(), 1); err != nil {
 		t.Fatal(err)
@@ -145,12 +154,22 @@ func TestOpenAIOAuthEndpointsQuotaAndPrivacyHTTP(t *testing.T) {
 	if mode := disableOpenAITraining(context.Background(), factory, "test-token", "", e); mode != PrivacyModeTrainingOff {
 		t.Fatal(mode)
 	}
-	if len(paths) < 4 {
+	if len(paths) != 6 {
 		t.Fatalf("expected quota, reset and privacy requests, got %d", len(paths))
 	}
 	for len(paths) > 0 {
 		if p := <-paths; len(p) < len("/relay/") || p[:len("/relay/")] != "/relay/" {
 			t.Fatal(p)
 		}
+	}
+}
+
+func TestOpenAIOAuthQuotaEndpointDefaults(t *testing.T) {
+	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	svc := &OpenAIQuotaService{accountRepo: &stubQuotaAccountRepo{accounts: map[int64]*Account{1: account}}}
+	for _, officialURL := range []string{chatGPTUsageURL, chatGPTRateLimitCreditsURL, chatGPTRateLimitResetURL} {
+		target, err := svc.oauthEndpoint(context.Background(), 1, officialURL)
+		require.NoError(t, err)
+		require.Equal(t, officialURL, target)
 	}
 }
