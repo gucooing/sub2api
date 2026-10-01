@@ -366,10 +366,11 @@ func TestGPT56DedicatedFallbacksUseOfficialRates(t *testing.T) {
 	tests := []struct {
 		model                             string
 		input, cached, cacheWrite, output float64
+		longContext                       bool
 	}{
 		{model: "gpt-5.6-sol", input: 5e-6, cached: 0.5e-6, cacheWrite: 6.25e-6, output: 30e-6},
-		{model: "gpt-5.6-terra", input: 2.5e-6, cached: 0.25e-6, cacheWrite: 3.125e-6, output: 15e-6},
-		{model: "gpt-5.6-luna", input: 1e-6, cached: 0.1e-6, cacheWrite: 1.25e-6, output: 6e-6},
+		{model: "gpt-5.6-terra", input: 2.5e-6, cached: 0.25e-6, cacheWrite: 3.125e-6, output: 15e-6, longContext: true},
+		{model: "gpt-5.6-luna", input: 1e-6, cached: 0.1e-6, cacheWrite: 1.25e-6, output: 6e-6, longContext: true},
 	}
 
 	for _, tt := range tests {
@@ -380,25 +381,30 @@ func TestGPT56DedicatedFallbacksUseOfficialRates(t *testing.T) {
 			svc := NewBillingService(&config.Config{}, pricingSvc)
 			pricing, err := svc.GetModelPricing(tt.model + "-preview")
 			require.NoError(t, err)
-			assertGPT56FallbackPricing(t, pricing, tt.input, tt.cached, tt.cacheWrite, tt.output)
+			assertGPT56FallbackPricing(t, pricing, tt.input, tt.cached, tt.cacheWrite, tt.output, tt.longContext)
 		})
 
 		t.Run(tt.model+"/billing_service", func(t *testing.T) {
 			svc := NewBillingService(&config.Config{}, nil)
 			pricing, err := svc.GetModelPricing(tt.model)
 			require.NoError(t, err)
-			assertGPT56FallbackPricing(t, pricing, tt.input, tt.cached, tt.cacheWrite, tt.output)
+			assertGPT56FallbackPricing(t, pricing, tt.input, tt.cached, tt.cacheWrite, tt.output, tt.longContext)
 		})
 	}
 }
 
-func assertGPT56FallbackPricing(t *testing.T, pricing *ModelPricing, input, cached, cacheWrite, output float64) {
+func assertGPT56FallbackPricing(t *testing.T, pricing *ModelPricing, input, cached, cacheWrite, output float64, longContext bool) {
 	t.Helper()
 	require.InDelta(t, input, pricing.InputPricePerToken, 1e-12)
 	require.InDelta(t, cached, pricing.CacheReadPricePerToken, 1e-12)
 	require.InDelta(t, cacheWrite, pricing.CacheCreationPricePerToken, 1e-12)
 	require.InDelta(t, output, pricing.OutputPricePerToken, 1e-12)
-	// 静态兜底只兜基础价；阶梯由目录数据（above_272k 折算或显式字段）驱动。
+	if longContext {
+		require.Equal(t, 272000, pricing.LongContextInputThreshold)
+		require.InDelta(t, 2.0, pricing.LongContextInputMultiplier, 1e-12)
+		require.InDelta(t, 1.5, pricing.LongContextOutputMultiplier, 1e-12)
+		return
+	}
 	require.Zero(t, pricing.LongContextInputThreshold)
 }
 
